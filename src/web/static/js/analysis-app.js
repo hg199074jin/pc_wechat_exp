@@ -16,6 +16,7 @@ const AnalysisApp = {
   init() {
     this.loadGroupNameCache();
     this.ensureGroupPickerUi();
+    this.ensureResultArtifactUi();
     this.ensureDateQuickControls();
     this.loadConfig();
     this.loadTagTree();
@@ -62,34 +63,24 @@ const AnalysisApp = {
       const style = document.createElement('style');
       style.id = 'analysis-group-picker-style';
       style.textContent = `
-        .group-picker { margin-top: 8px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; overflow: hidden; }
-        .group-picker-v2 { max-height: none; padding: 0; }
-        .group-picker-shell { display: grid; grid-template-columns: minmax(112px, 42%) minmax(0, 58%); min-height: 280px; max-height: 380px; }
-        .group-picker-tags, .group-picker-groups { min-width: 0; overflow-y: auto; }
-        .group-picker-tags { border-right: 1px solid #30363d; background: #0b1118; padding: 6px; }
-        .group-picker-groups { padding: 8px; }
-        .picker-pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; color: #8b949e; font-size: 12px; }
-        .picker-pane-actions { display: flex; gap: 6px; }
-        .picker-action { background: #161b22; color: #58a6ff; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; font-size: 12px; padding: 3px 7px; }
-        .picker-action:hover { border-color: #58a6ff; }
-        .group-picker-row { display: flex; align-items: center; min-height: 30px; gap: 8px; padding: 3px 6px; border-radius: 4px; box-sizing: border-box; }
-        .group-picker-row input { flex: 0 0 auto; }
-        .group-picker-row .label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .group-picker-row .count-badge { flex: 0 0 auto; font-size: 11px; color: #8b949e; background: #21262d; border: 1px solid #30363d; border-radius: 999px; padding: 1px 7px; }
-        .group-picker-row.tag { color: #c9d1d9; cursor: pointer; }
-        .group-picker-row.tag:hover, .group-picker-row.tag.active { background: #161b22; }
-        .group-picker-row.tag.active { outline: 1px solid #30363d; }
-        .group-picker-row.group { color: #c9d1d9; font-size: 12px; cursor: pointer; }
+        .group-picker { margin-top: 8px; border: 1px solid #30363d; border-radius: 8px; background: #0d1117; overflow: hidden; width: 100%; box-sizing: border-box; }
+        .group-picker-v2 { max-height: none; padding: 8px; }
+        .group-picker-shell { display: flex; flex-direction: column; gap: 8px; width: 100%; min-width: 0; }
+        .group-picker-category { display: flex; align-items: center; gap: 8px; min-width: 0; }
+        .group-picker-category select { height: 34px; }
+        .group-picker-list { width: 100%; max-height: 300px; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; }
+        .group-picker-row { display: flex; justify-content: flex-start; align-items: center; gap: 8px; height: 38px; padding: 0 10px; border-radius: 8px; box-sizing: border-box; width: 100%; min-width: 0; cursor: pointer; }
+        .group-picker-row input[type="checkbox"] { flex: 0 0 14px; width: 14px; min-width: 14px; max-width: 14px; height: 14px; margin: 0; }
+        .group-picker-row .label { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .group-picker-row.group { display: flex; justify-content: flex-start; align-items: center; margin: 0; color: #c9d1d9; font-size: 12px; }
         .group-picker-row.group:hover { background: #161b22; }
+        .group-picker-row.group:has(input:checked) { background: rgba(88, 166, 255, 0.14); outline: 1px solid rgba(88, 166, 255, 0.28); }
         .group-picker-empty { color: #8b949e; font-size: 12px; line-height: 1.6; padding: 24px 10px; text-align: center; }
         .group-picker-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
         .group-picker-actions { display: flex; gap: 6px; }
+        .group-picker-bulk-row { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
         .link-btn { background: transparent; border: 0; color: #58a6ff; cursor: pointer; font-size: 12px; padding: 2px 4px; text-decoration: none; }
         .link-btn:hover { text-decoration: underline; }
-        @media (max-width: 900px) {
-          .group-picker-shell { grid-template-columns: 1fr; max-height: 520px; }
-          .group-picker-tags { border-right: 0; border-bottom: 1px solid #30363d; max-height: 180px; }
-        }
       `;
       document.head.appendChild(style);
     }
@@ -108,6 +99,35 @@ const AnalysisApp = {
         </span>`;
       tree.parentNode.insertBefore(toolbar, tree);
     }
+    if (!document.getElementById('select-visible-groups')) {
+      const bulk = document.createElement('div');
+      bulk.className = 'group-picker-bulk-row';
+      bulk.innerHTML = `
+        <button class="link-btn" id="select-visible-groups" type="button">全选</button>
+        <button class="link-btn" id="clear-visible-groups" type="button">清空</button>`;
+      tree.parentNode.insertBefore(bulk, tree);
+    }
+  },
+
+  ensureResultArtifactUi() {
+    if (document.getElementById('analysis-result-artifact-style')) return;
+    const style = document.createElement('style');
+    style.id = 'analysis-result-artifact-style';
+    style.textContent = `
+      .result-meta-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; color: #8b949e; font-size: 12px; }
+      .result-pill { border: 1px solid #30363d; border-radius: 999px; padding: 2px 8px; background: #0d1117; }
+      .result-tabs { display: flex; gap: 6px; margin: 8px 0; border-bottom: 1px solid #30363d; padding-bottom: 6px; }
+      .result-tab { background: transparent; border: 1px solid #30363d; color: #8b949e; border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px; }
+      .result-tab.active { color: #58a6ff; border-color: rgba(88,166,255,.55); background: rgba(88,166,255,.1); }
+      .result-panel[hidden] { display: none; }
+      .candidate-item, .evidence-item { border: 1px solid #30363d; border-radius: 6px; padding: 10px; margin: 8px 0; background: #0d1117; }
+      .candidate-title { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+      .candidate-score { color: #f0c674; font-weight: 700; }
+      .evidence-quote { margin-top: 6px; color: #c9d1d9; border-left: 3px solid #30363d; padding-left: 8px; white-space: pre-wrap; }
+      .verify-ok { color: #3fb950; }
+      .verify-warn { color: #f0c674; }
+    `;
+    document.head.appendChild(style);
   },
 
   // -------------------------------------------------------------------
@@ -123,6 +143,8 @@ const AnalysisApp = {
       document.getElementById('cfg-model').value = cfg.model || '';
       document.getElementById('cfg-temperature').value = cfg.temperature || 0.3;
       document.getElementById('cfg-max-tokens').value = cfg.max_tokens || 4096;
+      const timeoutEl = document.getElementById('cfg-timeout');
+      if (timeoutEl) timeoutEl.value = cfg.timeout || 120;
       document.getElementById('llm-status').textContent =
         cfg.base_url ? `当前: ${cfg.model || '?'} @ ${cfg.base_url}` : '未配置';
     } catch (e) { /* ignore */ }
@@ -135,6 +157,7 @@ const AnalysisApp = {
       model: document.getElementById('cfg-model').value.trim(),
       temperature: parseFloat(document.getElementById('cfg-temperature').value) || 0.3,
       max_tokens: parseInt(document.getElementById('cfg-max-tokens').value, 10) || 4096,
+      timeout: parseInt(document.getElementById('cfg-timeout')?.value, 10) || 120,
     };
     if (!llm.base_url || !llm.api_key || !llm.model) {
       alert('请填写完整 LLM 配置'); return;
@@ -220,11 +243,35 @@ const AnalysisApp = {
 
     const shell = document.createElement('div');
     shell.className = 'group-picker-shell';
-    shell.appendChild(this._renderTagPane(tagItems));
+    shell.appendChild(this._renderTagSelector(tagItems));
     shell.appendChild(this._renderGroupPane());
     root.appendChild(shell);
     this._updateTagCheckboxStates();
     this.updateSelectedCount();
+  },
+
+  _renderTagSelector(tagItems) {
+    const wrap = document.createElement('div');
+    wrap.className = 'group-picker-category';
+    const select = document.createElement('select');
+    select.className = 'text-input';
+    select.setAttribute('aria-label', '选择标签');
+    for (const item of tagItems) {
+      const option = document.createElement('option');
+      option.value = item.pathStr;
+      option.textContent = `${'  '.repeat(item.depth)}${item.label} (${item.count})`;
+      option.selected = item.pathStr === this.activeTagPath;
+      select.appendChild(option);
+    }
+    select.addEventListener('change', (e) => {
+      this.activeTagPath = e.target.value || '';
+      this.groupSearchQuery = '';
+      const search = document.getElementById('group-search');
+      if (search) search.value = '';
+      this.renderTagTree();
+    });
+    wrap.appendChild(select);
+    return wrap;
   },
 
   _renderTagPane(tagItems) {
@@ -263,28 +310,9 @@ const AnalysisApp = {
 
   _renderGroupPane() {
     const pane = document.createElement('div');
-    pane.className = 'group-picker-groups';
+    pane.className = 'group-picker-list';
     const q = this.groupSearchQuery.trim().toLowerCase();
     const rows = q ? this._searchClassifiedGroups(q) : this._groupsForPath(this.activeTagPath);
-    const currentLabel = q ? `搜索结果` : (this.activeTagPath || '请选择标签');
-
-    const head = document.createElement('div');
-    head.className = 'picker-pane-head';
-    head.innerHTML = `
-      <span>${this._esc(currentLabel)} · ${rows.length} 个群</span>
-      <span class="picker-pane-actions">
-        <button class="picker-action" type="button" data-select-current>全选</button>
-        <button class="picker-action" type="button" data-clear-current>清空</button>
-      </span>`;
-    head.querySelector('[data-select-current]').onclick = () => {
-      rows.forEach(g => this.selectedChatIds.add(g.wxid));
-      this.renderTagTree();
-    };
-    head.querySelector('[data-clear-current]').onclick = () => {
-      rows.forEach(g => this.selectedChatIds.delete(g.wxid));
-      this.renderTagTree();
-    };
-    pane.appendChild(head);
 
     if (!rows.length) {
       const empty = document.createElement('div');
@@ -298,6 +326,21 @@ const AnalysisApp = {
     return pane;
   },
 
+  _currentVisibleGroups() {
+    const q = this.groupSearchQuery.trim().toLowerCase();
+    return q ? this._searchClassifiedGroups(q) : this._groupsForPath(this.activeTagPath);
+  },
+
+  selectVisibleGroups() {
+    this._currentVisibleGroups().forEach(g => this.selectedChatIds.add(g.wxid));
+    this.renderTagTree();
+  },
+
+  clearVisibleGroups() {
+    this._currentVisibleGroups().forEach(g => this.selectedChatIds.delete(g.wxid));
+    this.renderTagTree();
+  },
+
   _renderGroupRow(chatId, pathStr = '') {
     const label = this.groupNameMap[chatId] || chatId;
     const row = document.createElement('label');
@@ -305,7 +348,7 @@ const AnalysisApp = {
     row.dataset.searchText = `${label} ${chatId} ${pathStr}`.toLowerCase();
     row.innerHTML = `
       <input type="checkbox" data-chat-id="${this._esc(chatId)}" ${this.selectedChatIds.has(chatId) ? 'checked' : ''}>
-      <span class="label" title="${this._esc(chatId)}">${this._esc(label)}</span>`;
+      <span class="label" title="${this._esc(label)}">${this._esc(label)}</span>`;
     row.querySelector('input').addEventListener('change', (e) => {
       if (e.target.checked) this.selectedChatIds.add(chatId);
       else this.selectedChatIds.delete(chatId);
@@ -421,13 +464,16 @@ const AnalysisApp = {
   // -------------------------------------------------------------------
   // Results
   // -------------------------------------------------------------------
-  async loadResults() {
+  async loadResults(options = {}) {
     try {
-      const r = await fetch('/api/analysis/results');
+      const url = options.cacheBust ? `/api/analysis/results?t=${Date.now()}` : '/api/analysis/results';
+      const r = await fetch(url, {cache: 'no-store'});
       const data = await r.json();
       this.results = data.results || [];
       this.renderResults();
+      return true;
     } catch (e) { /* ignore */ }
+    return false;
   },
 
   renderResults() {
@@ -441,23 +487,63 @@ const AnalysisApp = {
       const groupName = this._groupName(r.chat_id);
       const card = document.createElement('div');
       card.className = 'result-card';
+      const verifyText = r.verify_pass_rate == null
+        ? '证据未核查'
+        : `证据通过率 ${Math.round(r.verify_pass_rate * 100)}%`;
       card.innerHTML = `
         <div class="result-header">
           <strong title="${this._esc(r.chat_id)}">${this._esc(groupName)}</strong>
           <span class="hint">${r.date}</span>
           <button class="btn-tiny btn-danger" data-del-chat="${this._esc(r.chat_id)}" data-del-date="${r.date}">删除</button>
         </div>
-        <div class="result-body" data-md-empty="true">加载中...</div>`;
+        <div class="result-meta-row">
+          <span class="result-pill">${this._esc(r.artifact_status === 'available' ? 'Artifact 已生成' : '旧版报告')}</span>
+          <span class="result-pill">${this._esc(verifyText)}</span>
+          <span class="result-pill">知识候选 ${r.knowledge_candidate_count || 0}</span>
+        </div>
+        <div class="result-tabs" data-chat-id="${this._esc(r.chat_id)}" data-date="${r.date}">
+          <button class="result-tab active" data-result-tab="report">分析报告</button>
+          <button class="result-tab" data-result-tab="candidates">知识候选</button>
+          <button class="result-tab" data-result-tab="evidence">证据来源</button>
+        </div>
+        <div class="result-panel" data-panel="report"><div class="result-body" data-md-empty="true">加载中...</div></div>
+        <div class="result-panel" data-panel="candidates" hidden>加载中...</div>
+        <div class="result-panel" data-panel="evidence" hidden>加载中...</div>`;
       container.appendChild(card);
       this._loadMd(r.chat_id, r.date, card.querySelector('.result-body'));
     });
-    container.addEventListener('click', e => {
+    container.onclick = e => {
       const btn = e.target.closest('button[data-del-chat]');
-      if (!btn) return;
-      if (!confirm(`删除 ${btn.dataset.delDate} 的分析结果？`)) return;
-      fetch(`/api/analysis/result/${encodeURIComponent(btn.dataset.delChat)}/${btn.dataset.delDate}`, {method: 'DELETE'})
-        .then(() => this.loadResults());
+      if (btn) {
+        if (!confirm(`删除 ${btn.dataset.delDate} 的分析结果？`)) return;
+        fetch(`/api/analysis/result/${encodeURIComponent(btn.dataset.delChat)}/${btn.dataset.delDate}`, {method: 'DELETE'})
+          .then(() => this.loadResults());
+        return;
+      }
+      const tab = e.target.closest('button[data-result-tab]');
+      if (tab) {
+        this.activateResultTab(tab);
+        return;
+      }
+      const importBtn = e.target.closest('button[data-import-candidates]');
+      if (importBtn) this.importKnowledgeCandidates(importBtn.dataset.chatId, importBtn.dataset.date);
+    };
+  },
+
+  activateResultTab(tab) {
+    const tabs = tab.closest('.result-tabs');
+    const card = tab.closest('.result-card');
+    const target = tab.dataset.resultTab;
+    tabs.querySelectorAll('.result-tab').forEach(btn => btn.classList.toggle('active', btn === tab));
+    card.querySelectorAll('.result-panel').forEach(panel => {
+      panel.hidden = panel.dataset.panel !== target;
     });
+    if (target !== 'report') {
+      const panel = card.querySelector(`.result-panel[data-panel="${target}"]`);
+      if (panel && !panel.dataset.loaded) {
+        this._loadArtifactPanel(tabs.dataset.chatId, tabs.dataset.date, card, target);
+      }
+    }
   },
 
   async _loadMd(chatId, date, target) {
@@ -467,6 +553,103 @@ const AnalysisApp = {
       const data = await r.json();
       target.innerHTML = marked.parse(this.sanitizeMarkdown(data.content || '', this._groupName(chatId)));
     } catch (e) { target.textContent = '加载失败'; }
+  },
+
+  async _loadArtifactPanel(chatId, date, card, panelName) {
+    const panel = card.querySelector(`.result-panel[data-panel="${panelName}"]`);
+    if (!panel) return;
+    try {
+      const r = await fetch(`/api/analysis/result/${encodeURIComponent(chatId)}/${date}/artifact`);
+      if (!r.ok) {
+        panel.innerHTML = '<div class="empty-state">这个结果没有结构化 artifact，重新分析后可查看。</div>';
+        panel.dataset.loaded = '1';
+        return;
+      }
+      const data = await r.json();
+      const artifact = data.artifact || {};
+      panel.innerHTML = panelName === 'candidates'
+        ? this.renderKnowledgeCandidates(artifact, chatId, date)
+        : this.renderEvidenceSources(artifact);
+      panel.dataset.loaded = '1';
+    } catch (e) {
+      panel.textContent = '加载失败';
+    }
+  },
+
+  renderKnowledgeCandidates(artifact, chatId, date) {
+    const candidates = [];
+    (artifact.topics || []).forEach(topic => {
+      (topic.knowledge_candidates || []).forEach(c => candidates.push({...c, topic: topic.title || ''}));
+    });
+    if (!candidates.length) return '<div class="empty-state">没有发现值得沉淀的知识候选。</div>';
+    const items = candidates.map(c => `
+      <div class="candidate-item">
+        <div class="candidate-title">
+          <strong>${this._esc(c.title || '未命名知识')}</strong>
+          <span class="candidate-score">${parseInt(c.score || 0, 10)}</span>
+        </div>
+        <div class="hint">${this._esc(c.type || 'note')} · ${this._esc(c.topic || '')}</div>
+        <p>${this._esc(c.summary || '')}</p>
+        <p class="hint">${this._esc(c.why_valuable || '')}</p>
+      </div>`).join('');
+    return `
+      <div style="display:flex;justify-content:flex-end;margin:6px 0">
+        <button class="btn-tiny" data-import-candidates="1" data-chat-id="${this._esc(chatId)}" data-date="${date}">沉淀高分知识</button>
+      </div>
+      ${items}`;
+  },
+
+  renderEvidenceSources(artifact) {
+    const rows = [];
+    (artifact.topics || []).forEach(topic => {
+      (topic.evidence || []).forEach(e => rows.push({...e, topic: topic.title || ''}));
+    });
+    const warnings = (artifact.verify && artifact.verify.warnings) || [];
+    if (!rows.length) return '<div class="empty-state">没有可显示的证据来源。</div>';
+    const items = rows.map(e => `
+      <div class="evidence-item">
+        <div><strong>${this._esc(e.topic || '未命名话题')}</strong>
+          <span class="${e.verified ? 'verify-ok' : 'verify-warn'}">${e.verified ? '已验证' : '待核实'}</span>
+        </div>
+        <div class="hint">msg_id=${this._esc(String(e.msg_id || ''))} · ${this._esc(e.time || '')} · ${this._esc(e.sender || '')}</div>
+        <div class="evidence-quote">${this._esc(e.quote || '')}</div>
+      </div>`).join('');
+    const warnHtml = warnings.length
+      ? `<div class="hint">核查提示：${warnings.length} 条证据需要人工复核。</div>`
+      : '';
+    return warnHtml + items;
+  },
+
+  async importKnowledgeCandidates(chatId, date) {
+    try {
+      const r = await fetch(`/api/analysis/result/${encodeURIComponent(chatId)}/${date}/knowledge-candidates/import`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({min_score: 80}),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) throw new Error(data.error || '导入失败');
+      alert(`已沉淀 ${data.created || 0} 条知识卡片，可在知识雷达查看。`);
+    } catch (e) {
+      alert(`沉淀失败：${e.message}`);
+    }
+  },
+
+  renderRunSummary(result) {
+    const summary = result?.summary || {};
+    const rows = result?.results || [];
+    const skipped = rows.filter(r => r.status === 'skip');
+    const errors = rows.filter(r => r.status === 'error');
+    const lines = [
+      `✅ 分析完成：成功 ${summary.ok || 0} 个，跳过 ${summary.skip || 0} 个，失败 ${summary.error || 0} 个`,
+    ];
+    skipped.slice(0, 8).forEach(r => {
+      lines.push(`跳过「${r.group_name || r.chat_id}」：${r.error || '无可分析内容'}`);
+    });
+    errors.slice(0, 5).forEach(r => {
+      lines.push(`失败「${r.group_name || r.chat_id}」：${r.error || '未知错误'}`);
+    });
+    return lines.map(line => this._esc(line)).join('<br>');
   },
 
   sanitizeMarkdown(content, groupName) {
@@ -612,8 +795,9 @@ const AnalysisApp = {
               fill.style.width = (ev.progress * 100) + '%';
               text.textContent = ev.detail || '';
             } else if (ev.stage === 'done') {
-              text.textContent = '✅ 分析完成！';
-              this.loadResults();
+              text.innerHTML = this.renderRunSummary(ev.result || {});
+              await this.loadResults({cacheBust: true});
+              setTimeout(() => this.loadResults({cacheBust: true}), 600);
             } else if (ev.stage === 'error') {
               text.textContent = '❌ 错误: ' + (ev.message || '');
             }
@@ -639,6 +823,10 @@ const AnalysisApp = {
     document.getElementById('close-schedule').onclick = () => { document.getElementById('schedule-modal').hidden = true; };
     document.getElementById('save-schedule').onclick = () => this.saveSchedule();
     document.getElementById('refresh-groups').onclick = () => this.loadTagTree();
+    const selectVisible = document.getElementById('select-visible-groups');
+    if (selectVisible) selectVisible.onclick = () => this.selectVisibleGroups();
+    const clearVisible = document.getElementById('clear-visible-groups');
+    if (clearVisible) clearVisible.onclick = () => this.clearVisibleGroups();
     const quickDates = document.getElementById('date-quick-actions');
     if (quickDates) {
       quickDates.addEventListener('click', (e) => {

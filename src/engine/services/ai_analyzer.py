@@ -12,11 +12,23 @@ import uuid as _uuid
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Callable
 
+from engine.services.analysis_artifact import (
+    normalize_artifact,
+    parse_artifact_json,
+    render_markdown_report,
+    save_artifact,
+)
+from engine.services.evidence_verifier import verify_artifact_evidence
 from engine.services.message import query_messages
 from engine.services.name_resolver import resolve_wxid
+from engine.services.style_fingerprint import ensure_style, style_to_prompt
 
 # Maximum messages per group per day — 超过则截断到最近 N 条
 MAX_MSG_PER_GROUP = 3000
+DEFAULT_LLM_TIMEOUT = 120
+ARTIFACT_CHUNK_CHAR_THRESHOLD = 12000
+ARTIFACT_CHUNK_CHAR_SIZE = 6000
+MAX_ARTIFACT_CHUNKS = 8
 
 # 链接消息类型 (微信 local_type=49)
 _LINK_TYPE = 49
@@ -114,6 +126,124 @@ def format_messages_for_llm(messages: List[Dict]) -> str:
         lines.append(f'\n(共 {total} 条消息, 已截断到最近 {MAX_MSG_PER_GROUP} 条)')
 
     return '\n'.join(lines)
+
+
+def format_messages_for_artifact(messages: List[Dict]) -> str:
+    """Format messages with msg_id for artifact extraction."""
+    sorted_msgs = sorted(messages, key=lambda m: m.get('create_time') or 0)
+    lines = []
+    for msg in sorted_msgs:
+        line = _format_single_msg(msg)
+        if not line:
+            continue
+        msg_id = msg.get('id') if msg.get('id') is not None else msg.get('msg_id')
+        if msg_id is None:
+            msg_id = ''
+        lines.append(f'[msg_id={msg_id}] {line}')
+
+    total = len(lines)
+    if total > MAX_MSG_PER_GROUP:
+        lines = lines[:MAX_MSG_PER_GROUP]
+        lines.append(f'\n(共 {total} 条消息, 已截断到最近 {MAX_MSG_PER_GROUP} 条)')
+    return '\n'.join(lines)
+
+
+def _compute_message_stats(messages: list, formatted: str) -> dict:
+    """Compute deterministic stats for artifact prompts."""
+    senders = set()
+    formatted_count = 0
+    for msg in messages or []:
+        if _format_single_msg(msg):
+            formatted_count += 1
+            sender = msg.get('sender_name') or msg.get('sender')
+            if sender:
+                senders.add(sender)
+    return {
+        'message_count': len(messages or []),
+        'formatted_count': formatted_count,
+        'unique_senders': len(senders),
+        'total_chars': len(formatted or ''),
+        'chunked': False,
+        'chunks': 0,
+        'truncated': formatted_count > MAX_MSG_PER_GROUP,
+    }
+
+
+def _chunk_text_by_line(text: str, chunk_size: int = ARTIFACT_CHUNK_CHAR_SIZE) -> list:
+    """Split formatted text by line without splitting a message line."""
+    chunks, cur, cur_len = [], [], 0
+    for line in (text or '').splitlines():
+        line_len = len(line) + 1
+        if cur and cur_len + line_len > chunk_size:
+            chunks.append('\n'.join(cur))
+            cur, cur_len = [], 0
+        cur.append(line)
+        cur_len += line_len
+    if cur:
+        chunks.append('\n'.join(cur))
+    return chunks
+
+
+def build_artifact_prompt(group_name: str, date: str, stats: dict,
+                          formatted_messages: str,
+                          style_prompt: str = '',
+                          partial: bool = False) -> Tuple[str, str]:
+    """Build prompt that asks the LLM to return a strict analysis artifact JSON."""
+    phase = '这是分块消息，请只分析本块内容。' if partial else '这是完整消息，请输出完整分析。'
+    system = f"""你是一个专业的群聊知识分析助手。你的任务不是直接写 Markdown，而是输出可机器解析的 JSON artifact。
+
+硬性要求：
+1. 只输出 JSON，不要 Markdown，不要解释，不要 ``` 包裹。
+2. evidence.msg_id 必须来自输入中的 [msg_id=数字]。
+3. evidence.quote 必须逐字摘自原始消息，禁止改写、翻译、概括。
+4. evidence.sender 必须是该消息的真实发送者。
+5. 每个话题最多给 3 条 evidence。
+6. knowledge_candidates 只收录真正值得长期沉淀的知识；没有就返回空数组，不要硬编。
+7. 每个 knowledge candidate 必须说明 why_valuable，并用 source_msg_ids 绑定原始消息。
+8. 使用简体中文，避免英文元话语。
+
+{style_prompt}
+
+输出 JSON Schema：
+{{
+  "summary": "2-3句话总体摘要",
+  "topics": [
+    {{
+      "id": "topic_1",
+      "title": "话题标题",
+      "summary": "话题摘要",
+      "participants": ["发言人"],
+      "evidence": [
+        {{"msg_id": 123, "time": "10:32", "sender": "张三", "quote": "原始消息摘录"}}
+      ],
+      "knowledge_candidates": [
+        {{
+          "title": "知识标题",
+          "type": "audit_case|sop|prompt|faq|article|tool|risk|methodology|note",
+          "score": 0,
+          "summary": "摘要",
+          "why_valuable": "为什么值得沉淀",
+          "content_md": "结构化正文",
+          "tags": ["标签"],
+          "source_msg_ids": [123]
+        }}
+      ]
+    }}
+  ],
+  "followups": [
+    {{"title": "待跟进事项", "owner": "", "evidence_msg_ids": [123]}}
+  ]
+}}
+"""
+    user = (
+        f'群聊名称: {group_name}\n'
+        f'日期: {date}\n'
+        f'消息数: {stats.get("message_count", 0)} / 可分析消息: {stats.get("formatted_count", 0)} / '
+        f'发言人: {stats.get("unique_senders", 0)} / 总字数: {stats.get("total_chars", 0)}\n'
+        f'{phase}\n\n'
+        f'消息记录:\n{formatted_messages}'
+    )
+    return system, user
 
 
 def build_prompt(group_name: str, date: str, msg_count: int,
@@ -224,6 +354,15 @@ def call_llm(system: str, user: str, base_url: str, api_key: str,
             raise RuntimeError(f'LLM request failed: {e}')
 
     raise RuntimeError(f'LLM request timed out twice: {last_err}')
+
+
+def _llm_timeout(cfg: dict, default: int = DEFAULT_LLM_TIMEOUT) -> int:
+    """Return a bounded LLM timeout in seconds."""
+    try:
+        value = int(cfg.get('timeout') or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(15, min(600, value))
 
 
 # ---------------------------------------------------------------------------
@@ -355,18 +494,75 @@ def config_path_for(decrypted_dir: str) -> str:
     return os.path.join(storage_dir_for(decrypted_dir), 'config.json')
 
 
+def _call_artifact_llm(group_name: str, date: str, stats: dict,
+                       formatted: str, style_prompt: str,
+                       cfg: dict, *, partial: bool = False) -> dict:
+    """Call LLM and parse a normalized artifact."""
+    system, user = build_artifact_prompt(
+        group_name, date, stats, formatted, style_prompt=style_prompt, partial=partial
+    )
+    raw = call_llm(
+        system=system, user=user,
+        base_url=cfg['base_url'],
+        api_key=cfg['api_key'],
+        model=cfg['model'],
+        temperature=cfg.get('temperature', 0.2),
+        max_tokens=cfg.get('max_tokens', 4096),
+        timeout=_llm_timeout(cfg),
+    )
+    try:
+        return parse_artifact_json(raw)
+    except Exception as e:
+        raise ValueError(f'LLM 输出不是合法 JSON: {e}')
+
+
+def _rollup_artifacts(group_name: str, date: str, stats: dict,
+                      partial_artifacts: list, style_prompt: str,
+                      cfg: dict) -> dict:
+    """Ask LLM to merge chunk artifacts into one artifact."""
+    system = """你是结构化群聊分析合并助手。请把多个分块 artifact 合并成一份完整 artifact。
+
+硬性要求：
+1. 只输出 JSON，不要 Markdown，不要解释，不要 ``` 包裹。
+2. 合并重复话题，保留最有证据支撑的内容。
+3. evidence 的 msg_id、sender、quote 必须原样保留。
+4. knowledge_candidates 去重，保留分数更高、证据更完整的候选。
+"""
+    if style_prompt:
+        system += '\n' + style_prompt
+    user = (
+        f'群聊名称: {group_name}\n日期: {date}\n统计: {_json.dumps(stats, ensure_ascii=False)}\n\n'
+        f'分块 artifacts:\n{_json.dumps(partial_artifacts, ensure_ascii=False)}'
+    )
+    raw = call_llm(
+        system=system, user=user,
+        base_url=cfg['base_url'],
+        api_key=cfg['api_key'],
+        model=cfg['model'],
+        temperature=cfg.get('temperature', 0.2),
+        max_tokens=cfg.get('max_tokens', 4096),
+        timeout=_llm_timeout(cfg),
+    )
+    try:
+        return parse_artifact_json(raw)
+    except Exception as e:
+        raise ValueError(f'LLM 输出不是合法 JSON: {e}')
+
+
 def analyze_group(decrypted_dir: str, chat_id: str, group_name: str,
                   date: str, wxid: str = None,
-                  config_path: str = None) -> Tuple[str, str]:
-    """Analyze one group for one date. Returns (markdown, status).
+                  config_path: str = None,
+                  progress_cb: Optional[Callable] = None) -> Tuple[str, str, int]:
+    """Analyze one group for one date. Returns (message, status, msg_count).
 
-    status in {'ok', 'skip', 'error'}
+    status in {'ok', 'skip', 'error'}. For ok, message is markdown. For skip or
+    error, message is the reason shown to the user.
     """
     cfg_path = config_path or config_path_for(decrypted_dir)
     cfg = load_llm_config(cfg_path)
 
     if not cfg.get('base_url') or not cfg.get('api_key') or not cfg.get('model'):
-        return '', 'error: LLM 未配置'
+        return 'LLM 未配置', 'error', 0
 
     try:
         result = query_messages(
@@ -377,28 +573,69 @@ def analyze_group(decrypted_dir: str, chat_id: str, group_name: str,
         )
         messages = result.get('messages', [])
     except FileNotFoundError:
-        return '', 'skip'
+        return '未找到该群当天的聊天数据库', 'skip', 0
     except Exception as e:
-        return f'查询消息失败: {e}', 'error'
+        return f'查询消息失败: {e}', 'error', 0
 
     if not messages:
-        return '', 'skip'
+        return '当天没有可分析的文字/链接消息', 'skip', 0
 
-    formatted = format_messages_for_llm(messages)
-    system, user = build_prompt(group_name, date, len(messages), formatted)
+    formatted = format_messages_for_artifact(messages)
+    if not formatted.strip():
+        return '当天消息主要是图片、语音、文件或系统消息，暂无可总结文本', 'skip', len(messages)
+
+    stats = _compute_message_stats(messages, formatted)
+    style_prompt = ''
+    try:
+        style_prompt = style_to_prompt(ensure_style(decrypted_dir, chat_id, group_name))
+    except Exception:
+        style_prompt = ''
+
+    if progress_cb:
+        progress_cb(chat_id, group_name, 'extracting_artifact', len(messages))
 
     try:
-        markdown = call_llm(
-            system=system, user=user,
-            base_url=cfg['base_url'],
-            api_key=cfg['api_key'],
-            model=cfg['model'],
-            temperature=cfg.get('temperature', 0.3),
-            max_tokens=cfg.get('max_tokens', 4096),
-        )
+        if len(formatted) > ARTIFACT_CHUNK_CHAR_THRESHOLD:
+            chunks = _chunk_text_by_line(formatted)
+            if len(chunks) > MAX_ARTIFACT_CHUNKS:
+                chunks = chunks[-MAX_ARTIFACT_CHUNKS:]
+                stats['truncated'] = True
+            stats['chunked'] = True
+            stats['chunks'] = len(chunks)
+            partials = []
+            for chunk in chunks:
+                partials.append(_call_artifact_llm(
+                    group_name, date, stats, chunk, style_prompt, cfg, partial=True
+                ))
+            artifact_data = _rollup_artifacts(group_name, date, stats, partials, style_prompt, cfg)
+        else:
+            artifact_data = _call_artifact_llm(
+                group_name, date, stats, formatted, style_prompt, cfg, partial=False
+            )
+    except ValueError as e:
+        return str(e), 'error', len(messages)
     except Exception as e:
-        return str(e), 'error'
+        return str(e), 'error', len(messages)
 
+    if progress_cb:
+        progress_cb(chat_id, group_name, 'verifying_evidence', len(messages))
+    artifact = normalize_artifact(
+        artifact_data,
+        chat_id=chat_id,
+        group_name=group_name,
+        date=date,
+        stats=stats,
+    )
+    artifact['verify'] = verify_artifact_evidence(artifact, messages)
+    save_artifact(storage_dir_for(decrypted_dir), artifact)
+
+    if progress_cb:
+        candidates_count = sum(
+            len(topic.get('knowledge_candidates') or [])
+            for topic in artifact.get('topics') or []
+        )
+        progress_cb(chat_id, group_name, 'rendering_report', candidates_count)
+    markdown = render_markdown_report(artifact)
     markdown = sanitize_analysis_markdown(markdown, group_name)
 
     out = result_path(storage_dir_for(decrypted_dir), chat_id, date)
@@ -407,9 +644,9 @@ def analyze_group(decrypted_dir: str, chat_id: str, group_name: str,
         with open(out, 'w', encoding='utf-8') as f:
             f.write(markdown)
     except OSError as e:
-        return f'保存失败: {e}', 'error'
+        return f'保存失败: {e}', 'error', len(messages)
 
-    return markdown, 'ok'
+    return markdown, 'ok', len(messages)
 
 
 def analyze_multiple(decrypted_dir: str, chat_ids: list, group_names: dict,
@@ -426,11 +663,22 @@ def analyze_multiple(decrypted_dir: str, chat_ids: list, group_names: dict,
         group_name = group_names.get(chat_id, chat_id)
         if progress_cb:
             progress_cb(chat_id, group_name, 'analyzing', i, total)
-        md, status = analyze_group(
+        md, status, msg_count = analyze_group(
             decrypted_dir, chat_id, group_name, date,
             wxid=wxid,
+            progress_cb=(
+                (lambda cid, gn, st, count, i=i, total=total:
+                 progress_cb(cid, gn, st, i, total, count))
+                if progress_cb else None
+            ),
         )
-        results.append({'chat_id': chat_id, 'status': status, 'error': '' if status == 'ok' else md})
+        results.append({
+            'chat_id': chat_id,
+            'group_name': group_name,
+            'status': status,
+            'msg_count': msg_count,
+            'error': '' if status == 'ok' else md,
+        })
         if progress_cb:
             progress_cb(chat_id, group_name, 'done' if status == 'ok' else status, i, total)
     return results
@@ -517,6 +765,7 @@ def auto_classify_groups(group_names: list, batch_size: int = 80,
                     model=cfg['model'],
                     temperature=cfg.get('temperature', 0.3),
                     max_tokens=cfg.get('max_tokens', 4096),
+                    timeout=_llm_timeout(cfg),
                 )
                 parsed = _json.loads(content)
                 for cat, names in parsed.items():

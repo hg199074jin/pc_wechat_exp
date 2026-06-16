@@ -37,12 +37,50 @@ def _config_path():
     return config_path_for(decrypted_dir)
 
 
-# ---------------------------------------------------------------------------
-# Card CRUD
-# ---------------------------------------------------------------------------
+def _chat_tag_paths(tags: list) -> dict:
+    """Return {chat_id: [tag_path, ...]} from the saved group tag tree."""
+    result = {}
 
-@knowledge_bp.route('/cards')
-def list_cards_api():
+    def _walk(nodes, prefix=''):
+        for node in nodes or []:
+            name = node.get('name') or ''
+            path = f'{prefix}/{name}' if prefix else name
+            for cid in node.get('chat_ids') or []:
+                result.setdefault(cid, []).append(path)
+            _walk(node.get('children') or [], path)
+
+    _walk(tags)
+    return result
+
+
+def _attach_card_tag_paths(cards: list) -> list:
+    """Attach source group tag paths to cards for UI grouping/context."""
+    tag_map = _chat_tag_paths(load_tags(_config_path()))
+    for card in cards or []:
+        paths = []
+        seen = set()
+        for cid in card.get('source_chat_ids') or []:
+            for path in tag_map.get(cid, []):
+                if path and path not in seen:
+                    seen.add(path)
+                    paths.append(path)
+        card['tag_paths'] = paths
+    return cards
+
+
+def _clean_card_sources(card: dict) -> dict:
+    """Clean source quotes for display/export without mutating DB schema."""
+    for src in card.get('sources') or []:
+        src['quote'] = extractor.readable_message_text(src.get('quote') or '')
+    return card
+
+
+def _list_cards_for_request(*, force_large: bool = False) -> dict:
+    """List cards with common filters plus optional tag_path filtering."""
+    tag_path = request.args.get('tag_path') or ''
+    limit = request.args.get('limit', 100, type=int)
+    offset = request.args.get('offset', 0, type=int)
+    query_limit = 5000 if (tag_path or force_large) else limit
     result = store.list_cards(
         _db_path(),
         status=request.args.get('status'),
@@ -52,9 +90,26 @@ def list_cards_api():
         date_from=request.args.get('date_from'),
         date_to=request.args.get('date_to'),
         chat_id=request.args.get('chat_id'),
-        limit=request.args.get('limit', 100, type=int),
-        offset=request.args.get('offset', 0, type=int),
+        limit=query_limit,
+        offset=0 if tag_path else offset,
     )
+    cards = _attach_card_tag_paths(result.get('cards') or [])
+    if tag_path:
+        cards = [c for c in cards if tag_path in (c.get('tag_paths') or [])]
+        result['total'] = len(cards)
+        result['cards'] = cards[offset:offset + limit]
+    else:
+        result['cards'] = cards
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Card CRUD
+# ---------------------------------------------------------------------------
+
+@knowledge_bp.route('/cards')
+def list_cards_api():
+    result = _list_cards_for_request()
     return jsonify(result)
 
 
@@ -63,6 +118,8 @@ def get_card_api(card_id):
     card = store.get_card(_db_path(), card_id)
     if not card:
         return jsonify({'error': 'not found'}), 404
+    _attach_card_tag_paths([card])
+    _clean_card_sources(card)
     return jsonify(card)
 
 
@@ -136,6 +193,7 @@ def source_context_api(card_id):
     card = store.get_card(_db_path(), card_id)
     if not card:
         return jsonify({'error': 'not found'}), 404
+    _clean_card_sources(card)
     return jsonify({'sources': card.get('sources', [])})
 
 
@@ -294,8 +352,11 @@ def export_cards_api():
             if card:
                 cards.append(card)
     else:
-        result = store.list_cards(dbp, status=status, min_score=min_score, limit=500)
+        result = _list_cards_for_request(force_large=True)
         cards = result.get('cards', [])
+
+    for card in cards:
+        _clean_card_sources(card)
 
     if not cards:
         return jsonify({'error': '没有可导出的卡片'}), 400

@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('src', 'src'), ('..\\tools\\silk_decoder.exe', 'tools')]
 binaries = []
-hiddenimports = ['Crypto.Cipher.AES', 'Crypto.Util.Padding', 'flask', 'werkzeug', 'jinja2', 'blackboxprotobuf', 'zstandard', 'openpyxl', 'jieba', 'jieba.posseg', 'requests', 'pypinyin']
+hiddenimports = ['Crypto.Cipher.AES', 'Crypto.Util.Padding', 'flask', 'werkzeug', 'jinja2', 'blackboxprotobuf', 'zstandard', 'openpyxl', 'jieba', 'jieba.posseg', 'requests', 'socks', 'pypinyin']
 tmp_ret = collect_all('jieba')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 

@@ -29,6 +29,7 @@ const KnowledgeApp = {
   bindEvents() {
     document.getElementById('btn-refresh').onclick = () => this.loadCards();
     document.getElementById('filter-type').onchange = () => this.loadCards();
+    document.getElementById('filter-tag-path').onchange = () => this.loadCards();
     document.getElementById('filter-min-score').onchange = () => this.loadCards();
     document.getElementById('knowledge-search').oninput = this._debounce(() => this.loadCards(), 300);
 
@@ -47,6 +48,9 @@ const KnowledgeApp = {
     // Scan
     document.getElementById('btn-scan').onclick = () => this.openScanModal();
     document.getElementById('btn-start-scan').onclick = () => this.runScan();
+    document.querySelectorAll('[data-scan-days]').forEach(btn => {
+      btn.onclick = () => this.setScanDateRange(btn.dataset.scanDays);
+    });
 
     // Export
     document.getElementById('btn-export-md').onclick = () => this.exportCards('md');
@@ -84,10 +88,12 @@ const KnowledgeApp = {
     const activeLi = document.querySelector('#status-nav li.active');
     const status = activeLi ? activeLi.dataset.status : '';
     const type = document.getElementById('filter-type').value;
+    const tagPath = document.getElementById('filter-tag-path')?.value || '';
     const q = document.getElementById('knowledge-search').value.trim();
     const minScore = document.getElementById('filter-min-score').value;
     if (status) params.set('status', status);
     if (type) params.set('type', type);
+    if (tagPath) params.set('tag_path', tagPath);
     if (q) params.set('q', q);
     if (minScore) params.set('min_score', minScore);
     params.set('limit', '200');
@@ -108,7 +114,20 @@ const KnowledgeApp = {
       const r = await fetch('/api/knowledge/tags');
       const data = await r.json();
       this.tags = data.tags || [];
+      this.renderTagFilter();
     } catch (e) { this.tags = []; }
+  },
+
+  renderTagFilter() {
+    const select = document.getElementById('filter-tag-path');
+    if (!select) return;
+    const current = select.value || '';
+    const items = this._flattenTagPaths(this.tags);
+    select.innerHTML = '<option value="">全部群标签</option>' + items.map(item => {
+      const label = `${'  '.repeat(item.depth)}${item.path} (${item.count})`;
+      return `<option value="${this.esc(item.path)}">${this.esc(label)}</option>`;
+    }).join('');
+    if (items.some(item => item.path === current)) select.value = current;
   },
 
   async loadSchedules() {
@@ -131,6 +150,7 @@ const KnowledgeApp = {
       return;
     }
     root.innerHTML = this.cards.map(c => this.renderCard(c)).join('');
+    this._syncBulkCheckboxes();
   },
 
   renderCard(c) {
@@ -159,6 +179,7 @@ const KnowledgeApp = {
         </div>
         <p class="knowledge-summary">${this.esc(c.summary || '')}</p>
         ${c.why_valuable ? `<p class="knowledge-why">💡 ${this.esc(c.why_valuable)}</p>` : ''}
+        ${this.renderTagPaths(c.tag_paths || [])}
         <div class="knowledge-tags">${(c.tags || []).map(t =>
           `<span class="knowledge-tag" data-tag="${this.esc(t)}">${this.esc(t)}</span>`
         ).join('')}</div>
@@ -177,9 +198,18 @@ const KnowledgeApp = {
             </div>
           </div>
           <button class="btn-tiny btn-danger" data-action="delete">删除</button>
-          <input type="checkbox" class="bulk-cb" style="display:none" data-card-id="${this.esc(c.id)}">
+          <label class="bulk-card-check"><input type="checkbox" class="bulk-cb" data-card-id="${this.esc(c.id)}" ${this.selectedIds.has(c.id) ? 'checked' : ''}> 批量</label>
         </div>
       </article>`;
+  },
+
+  renderTagPaths(paths) {
+    if (!paths || !paths.length) {
+      return '<div class="knowledge-tag-paths"><span class="knowledge-tag-path">未匹配群标签</span></div>';
+    }
+    return `<div class="knowledge-tag-paths">${paths.map(p =>
+      `<span class="knowledge-tag-path" title="${this.esc(p)}">${this.esc(p)}</span>`
+    ).join('')}</div>`;
   },
 
   renderSchedules(schedules) {
@@ -355,6 +385,15 @@ const KnowledgeApp = {
     document.getElementById('scan-modal').classList.remove('show');
   },
 
+  setScanDateRange(days) {
+    const n = Math.max(1, parseInt(days, 10) || 1);
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - n + 1);
+    document.getElementById('scan-date-from').value = start.toISOString().slice(0, 10);
+    document.getElementById('scan-date-to').value = end.toISOString().slice(0, 10);
+  },
+
   async runScan() {
     const chatIds = this._collectSelectedChatIds('scan-tag-picker');
     const dateFrom = document.getElementById('scan-date-from').value;
@@ -437,9 +476,11 @@ const KnowledgeApp = {
     const activeLi = document.querySelector('#status-nav li.active');
     const status = activeLi ? activeLi.dataset.status : '';
     const minScore = document.getElementById('filter-min-score').value;
+    const tagPath = document.getElementById('filter-tag-path')?.value || '';
     const params = new URLSearchParams({ format: fmt });
     if (status) params.set('status', status);
     if (minScore) params.set('min_score', minScore);
+    if (tagPath) params.set('tag_path', tagPath);
     window.open('/api/knowledge/export?' + params.toString(), '_blank');
   },
 
@@ -448,23 +489,37 @@ const KnowledgeApp = {
   // -----------------------------------------------------------------------
 
   toggleBulkSelect() {
-    const checkboxes = document.querySelectorAll('.bulk-cb');
-    const anyVisible = checkboxes.length > 0 && checkboxes[0].style.display === 'none';
-    checkboxes.forEach(cb => cb.style.display = anyVisible ? 'inline-block' : 'none');
-    if (anyVisible) {
-      // Add change listeners
-      checkboxes.forEach(cb => {
-        cb.onchange = () => {
-          if (cb.checked) this.selectedIds.add(cb.dataset.cardId);
-          else this.selectedIds.delete(cb.dataset.cardId);
-        };
-      });
+    const ids = this.cards.map(c => c.id).filter(Boolean);
+    const allSelected = ids.length > 0 && ids.every(id => this.selectedIds.has(id));
+    if (allSelected) {
+      ids.forEach(id => this.selectedIds.delete(id));
+    } else {
+      ids.forEach(id => this.selectedIds.add(id));
     }
+    this._syncBulkCheckboxes();
+  },
+
+  _syncBulkCheckboxes() {
+    document.querySelectorAll('.bulk-cb').forEach(cb => {
+      cb.checked = this.selectedIds.has(cb.dataset.cardId);
+      cb.onchange = () => {
+        if (cb.checked) this.selectedIds.add(cb.dataset.cardId);
+        else this.selectedIds.delete(cb.dataset.cardId);
+        this._updateBulkButton();
+      };
+    });
+    this._updateBulkButton();
+  },
+
+  _updateBulkButton() {
+    const btn = document.getElementById('btn-bulk-select');
+    if (!btn) return;
+    btn.textContent = this.selectedIds.size ? `已选 ${this.selectedIds.size} 条` : '全选当前列表';
   },
 
   async bulkAction(action) {
     const ids = Array.from(this.selectedIds);
-    if (!ids.length) { alert('请先勾选卡片（点击"全选"显示复选框）'); return; }
+    if (!ids.length) { alert('请先点击“全选当前列表”或勾选要处理的卡片'); return; }
     if (action === 'delete' && !confirm(`确定删除 ${ids.length} 条卡片？`)) return;
     await fetch('/api/knowledge/cards/bulk', {
       method: 'POST',
@@ -564,13 +619,22 @@ const KnowledgeApp = {
       const path = prefix ? `${prefix}/${node.name}` : node.name;
       const checked = preselected.includes(path) ? 'checked' : '';
       const chatIds = node.chat_ids || [];
-      html += `<label><input type="checkbox" data-tag-path="${this.esc(path)}" ${checked}> ${this.esc(node.name)} (${chatIds.length})</label>`;
+      html += `<label><input type="checkbox" data-tag-path="${this.esc(path)}" ${checked}><span class="tag-picker-label" title="${this.esc(path)}">${this.esc(node.name)} (${chatIds.length})</span></label>`;
       const children = node.children || [];
       if (children.length) {
         html += `<div class="tag-children">${this._buildTagPickerHtml(children, path, preselected)}</div>`;
       }
     }
     return html;
+  },
+
+  _flattenTagPaths(nodes, prefix = '', depth = 0, out = []) {
+    for (const node of nodes || []) {
+      const path = prefix ? `${prefix}/${node.name}` : node.name;
+      out.push({path, depth, count: (node.chat_ids || []).length});
+      this._flattenTagPaths(node.children || [], path, depth + 1, out);
+    }
+    return out;
   },
 
   _collectSelectedChatIds(containerId) {

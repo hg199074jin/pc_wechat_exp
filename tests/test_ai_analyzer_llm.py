@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from engine.services.ai_analyzer import call_llm, _get_config
+from engine.services.ai_analyzer import call_llm, _get_config, _llm_timeout, auto_classify_groups
 
 
 def _mock_response(content='test reply', status=200):
@@ -57,3 +57,21 @@ def test_get_config_missing_file():
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         assert _get_config(os.path.join(tmp, 'missing.json')) == {}
+
+
+def test_llm_timeout_defaults_and_bounds():
+    assert _llm_timeout({}) == 120
+    assert _llm_timeout({'timeout': '3'}) == 15
+    assert _llm_timeout({'timeout': '9999'}) == 600
+    assert _llm_timeout({'timeout': '180'}) == 180
+
+
+def test_auto_classify_groups_uses_configured_timeout():
+    with patch('engine.services.ai_analyzer.load_llm_config', return_value={
+        'base_url': 'https://api.example.com/v1',
+        'api_key': 'sk',
+        'model': 'm',
+        'timeout': 600,
+    }), patch('engine.services.ai_analyzer.call_llm', return_value='{"审计": ["群A"]}') as mock_call:
+        auto_classify_groups(['群A'], config_path='dummy')
+    assert mock_call.call_args.kwargs['timeout'] == 600

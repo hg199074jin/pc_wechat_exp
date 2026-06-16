@@ -12,6 +12,7 @@ from engine.services.chat import get_contacts
 from engine.services.message import query_messages, query_message_detail, get_chat_stats, get_chat_dates
 from engine.services.media import serve_media, serve_hardlink_media, serve_voice, transcribe_voice, decrypt_emoticon_aes_cbc
 from engine.services.address_book import get_all_contacts, get_all_groups
+from engine.config_file import get_group_blacklist, set_group_blacklist
 import csv
 import io
 import json
@@ -59,8 +60,23 @@ def _save_group_names_cache(decrypted_dir: str, groups: list) -> None:
         pass
 
 
+def _group_blacklist_ids() -> set:
+    return {
+        item.get('wxid')
+        for item in get_group_blacklist()
+        if isinstance(item, dict) and item.get('wxid')
+    }
+
+
+def _filter_blacklisted_groups(groups: list) -> list:
+    blocked = _group_blacklist_ids()
+    if not blocked:
+        return groups or []
+    return [g for g in groups or [] if g.get('wxid') not in blocked]
+
+
 def _resolve_group_names(decrypted_dir: str, progress_cb=None) -> list:
-    groups = get_all_groups(decrypted_dir)
+    groups = _filter_blacklisted_groups(get_all_groups(decrypted_dir))
     total = len(groups)
     if progress_cb:
         progress_cb(0, total, '准备解析群名称')
@@ -563,9 +579,9 @@ def address_book_groups():
     if groups is None:
         groups = _resolve_group_names(decrypted_dir)
         source = 'resolved'
+    else:
+        groups = _filter_blacklisted_groups(groups)
     groups = _enrich_group_stats(decrypted_dir, groups, include_activity=include_activity)
-    if source == 'cache' or include_activity:
-        _save_group_names_cache(decrypted_dir, groups)
     groups = _filter_recent_groups(groups, recent_days)
 
     return jsonify({
@@ -575,6 +591,75 @@ def address_book_groups():
         'activity': include_activity,
         'recent_days': recent_days,
     })
+
+
+@api_bp.route('/address-book/groups/blacklist', methods=['GET'])
+def address_book_groups_blacklist_get():
+    """Return blacklisted groups excluded from group loading."""
+    items = get_group_blacklist()
+    return jsonify({'blacklist': items, 'total': len(items)})
+
+
+@api_bp.route('/address-book/groups/blacklist', methods=['POST'])
+def address_book_groups_blacklist_add():
+    """Add groups to the loading blacklist."""
+    data = request.get_json(silent=True) or {}
+    incoming = data.get('groups') or []
+    if isinstance(incoming, dict):
+        incoming = [incoming]
+    if not isinstance(incoming, list):
+        return jsonify({'error': 'groups must be a list'}), 400
+
+    now = _dt.now().isoformat(timespec='seconds')
+    existing = get_group_blacklist()
+    by_id = {
+        item.get('wxid'): item
+        for item in existing
+        if isinstance(item, dict) and item.get('wxid')
+    }
+    for item in incoming:
+        if isinstance(item, str):
+            wxid = item.strip()
+            display_name = wxid
+        elif isinstance(item, dict):
+            wxid = str(item.get('wxid', '')).strip()
+            display_name = str(item.get('display_name') or wxid)
+        else:
+            continue
+        if not wxid:
+            continue
+        by_id[wxid] = {
+            'wxid': wxid,
+            'display_name': display_name,
+            'added_at': by_id.get(wxid, {}).get('added_at') or now,
+        }
+    items = list(by_id.values())
+    set_group_blacklist(items)
+    return jsonify({'blacklist': items, 'total': len(items)})
+
+
+@api_bp.route('/address-book/groups/blacklist', methods=['DELETE'])
+def address_book_groups_blacklist_delete():
+    """Remove one or more groups from the loading blacklist."""
+    wxids = request.args.getlist('wxid')
+    data = request.get_json(silent=True) or {}
+    body_ids = data.get('wxids') or data.get('groups') or []
+    if isinstance(body_ids, str):
+        body_ids = [body_ids]
+    for item in body_ids if isinstance(body_ids, list) else []:
+        if isinstance(item, dict):
+            wxids.append(str(item.get('wxid', '')).strip())
+        else:
+            wxids.append(str(item).strip())
+    remove_ids = {w for w in wxids if w}
+    if not remove_ids:
+        return jsonify({'error': 'wxid required'}), 400
+    items = [
+        item for item in get_group_blacklist()
+        if item.get('wxid') not in remove_ids
+    ]
+    set_group_blacklist(items)
+    return jsonify({'blacklist': items, 'total': len(items)})
 
 
 @api_bp.route('/address-book/groups/stream')
@@ -594,9 +679,8 @@ def address_book_groups_stream():
     def _gen():
         cached = None if force else _load_group_names_cache(decrypted_dir)
         if cached is not None:
+            cached = _filter_blacklisted_groups(cached)
             cached = _enrich_group_stats(decrypted_dir, cached, include_activity=include_activity)
-            if include_activity:
-                _save_group_names_cache(decrypted_dir, cached)
             visible = _filter_recent_groups(cached, recent_days)
             total = len(visible)
             yield _event({
@@ -611,7 +695,7 @@ def address_book_groups_stream():
             return
 
         try:
-            groups = get_all_groups(decrypted_dir)
+            groups = _filter_blacklisted_groups(get_all_groups(decrypted_dir))
             total = len(groups)
             yield _event({
                 'stage': 'progress',

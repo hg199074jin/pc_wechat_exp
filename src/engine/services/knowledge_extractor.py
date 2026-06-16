@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import html
 from datetime import datetime
 from typing import Dict, List, Tuple
 
@@ -12,6 +13,23 @@ CARD_TYPES = {
     'audit_case', 'sop', 'prompt', 'faq', 'article', 'tool',
     'risk', 'methodology', 'note',
 }
+
+
+def readable_message_text(content: str) -> str:
+    """Return human-readable text from WeChat message content.
+
+    Link/referenced messages are often XML. For knowledge sources, the useful
+    text is usually in <title>; expose that instead of raw XML.
+    """
+    text = (content or '').strip()
+    if not text:
+        return ''
+    if text.startswith('<?xml') or text.startswith('<msg') or '<appmsg>' in text:
+        m = re.search(r'<title>(.*?)</title>', text, flags=re.DOTALL | re.IGNORECASE)
+        if m:
+            title = re.sub(r'<[^>]+>', '', m.group(1))
+            return html.unescape(title).strip()
+    return text
 
 DOMAIN_LABELS = {
     'audit_ai': '审计/财税 + AI工具',
@@ -33,9 +51,15 @@ def _extract_json_object(text: str) -> str:
         s = re.sub(r'^```(?:json)?\s*', '', s)
         s = re.sub(r'\s*```$', '', s)
     start = s.find('{')
-    end = s.rfind('}')
-    if start >= 0 and end > start:
-        return s[start:end + 1]
+    if start >= 0:
+        candidate = s[start:]
+        try:
+            _, end = json.JSONDecoder().raw_decode(candidate)
+            return candidate[:end]
+        except json.JSONDecodeError:
+            end = candidate.rfind('}')
+            if end >= 0:
+                return candidate[:end + 1]
     return s
 
 
@@ -177,6 +201,7 @@ def format_messages_for_knowledge(messages: list) -> str:
             dt = ''
         sender = msg.get('sender_name') or msg.get('sender') or '未知'
         content = (msg.get('content') or '').strip()
+        content = readable_message_text(content)
         if not content:
             continue
         lines.append(f'[msg_id={msg_id}] [{dt}] {sender}: {content}')
@@ -252,7 +277,7 @@ def extract_cards_from_messages(
                 'msg_id': mid,
                 'sender': msg.get('sender_name') or msg.get('sender') or '',
                 'create_time': msg.get('create_time'),
-                'quote': (msg.get('content') or '')[:500],
+                'quote': readable_message_text(msg.get('content') or '')[:500],
                 'context': [],
             })
         # Fallback: attach first message as source
@@ -264,13 +289,89 @@ def extract_cards_from_messages(
                 'msg_id': msg.get('id') or msg.get('msg_id'),
                 'sender': msg.get('sender_name') or '',
                 'create_time': msg.get('create_time'),
-                'quote': (msg.get('content') or '')[:500],
+                'quote': readable_message_text(msg.get('content') or '')[:500],
                 'context': [],
             })
         card['date'] = date
         card['sources'] = sources
         cards.append(card)
     return cards
+
+
+def cards_from_analysis_artifact(artifact: dict, *, min_score: int = 80) -> List[Dict]:
+    """Convert artifact knowledge candidates into knowledge-store cards.
+
+    Unlike extract_cards_from_messages(), this function does not fallback to an
+    arbitrary first message when sources are missing. Missing evidence is
+    surfaced in why_valuable so the user can decide whether to keep the card.
+    """
+    chat_id = artifact.get('chat_id') or ''
+    chat_name = artifact.get('group_name') or chat_id
+    date = artifact.get('date') or ''
+    cards = []
+
+    for topic in artifact.get('topics') or []:
+        evidence_by_id = {}
+        for ev in topic.get('evidence') or []:
+            mid = ev.get('msg_id')
+            if mid is None:
+                continue
+            evidence_by_id[mid] = ev
+            evidence_by_id[str(mid)] = ev
+
+        for candidate in topic.get('knowledge_candidates') or []:
+            try:
+                score = int(candidate.get('score') or 0)
+            except (TypeError, ValueError):
+                score = 0
+            if score < min_score:
+                continue
+
+            source_msg_ids = candidate.get('source_msg_ids') or []
+            sources = []
+            missing = []
+            for mid in source_msg_ids:
+                ev = evidence_by_id.get(mid) or evidence_by_id.get(str(mid))
+                if not ev:
+                    missing.append(mid)
+                    continue
+                sources.append({
+                    'chat_id': chat_id,
+                    'chat_name': chat_name,
+                    'msg_id': ev.get('msg_id'),
+                    'sender': ev.get('sender') or '',
+                    'create_time': ev.get('create_time'),
+                    'quote': ev.get('quote') or '',
+                    'context': [{
+                        'topic': topic.get('title') or '',
+                        'time': ev.get('time') or '',
+                        'verified': ev.get('verified', False),
+                    }],
+                })
+
+            why = candidate.get('why_valuable') or ''
+            if missing:
+                suffix = f'证据缺失：{", ".join(str(x) for x in missing)}'
+                why = f'{why}\n{suffix}'.strip()
+
+            ctype = candidate.get('type') or 'note'
+            if ctype not in CARD_TYPES:
+                ctype = 'note'
+            cards.append({
+                'title': candidate.get('title') or '',
+                'type': ctype,
+                'status': 'inbox',
+                'score': score,
+                'summary': candidate.get('summary') or '',
+                'why_valuable': why,
+                'content_md': candidate.get('content_md') or '',
+                'tags': candidate.get('tags') if isinstance(candidate.get('tags'), list) else [],
+                'source_chat_ids': [chat_id] if chat_id else [],
+                'date': date,
+                'sources': sources,
+            })
+
+    return [c for c in cards if c.get('title')]
 
 
 def make_llm_call(config_path: str):
@@ -288,5 +389,6 @@ def make_llm_call(config_path: str):
             model=cfg.get('model', ''),
             temperature=cfg.get('temperature', 0.2),
             max_tokens=cfg.get('max_tokens', 4096),
+            timeout=ai_analyzer._llm_timeout(cfg),
         )
     return _call

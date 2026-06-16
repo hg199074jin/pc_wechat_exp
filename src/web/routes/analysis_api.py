@@ -16,6 +16,8 @@ if _BASE not in sys.path:
 
 from web.sse import create_sse_progress, sse_response
 from engine.services import ai_analyzer, ai_scheduler
+from engine.services import knowledge_extractor, knowledge_store
+from engine.services.analysis_artifact import artifact_path, load_artifact
 
 analysis_bp = Blueprint('analysis_api', __name__, url_prefix='/api/analysis')
 
@@ -91,7 +93,7 @@ def test_connection():
             user='说"连接成功"即可。',
             base_url=cfg['base_url'], api_key=cfg['api_key'],
             model=cfg['model'], temperature=cfg.get('temperature', 0.3),
-            max_tokens=64, timeout=15,
+            max_tokens=64, timeout=ai_analyzer._llm_timeout(cfg),
         )
         return jsonify({'ok': True, 'reply': reply[:200]})
     except Exception as e:
@@ -130,19 +132,32 @@ def run_analysis():
                 group_names[cid] = resolve_wxid(decrypted_dir, cid) or cid
 
             current = start
+            all_results = []
             while current <= end:
                 date_str = current.strftime('%Y-%m-%d')
                 push('progress', f'分析 {date_str}...', 0.1)
-                ai_analyzer.analyze_multiple(
+                day_results = ai_analyzer.analyze_multiple(
                     decrypted_dir, chat_ids, group_names,
                     date_str, wxid=wxid,
-                    progress_cb=lambda cid, gn, st, i, n: push(
-                        'progress', f'{gn}: {st} ({i}/{n})',
-                        i / max(n, 1) * 0.9 + 0.1,
-                    ),
+                    progress_cb=lambda *args: _push_analysis_progress(push, *args),
                 )
+                for item in day_results:
+                    item['date'] = date_str
+                all_results.extend(day_results)
                 current += timedelta(days=1)
-            push.done({'ok': True})
+            ok_count = sum(1 for r in all_results if r.get('status') == 'ok')
+            skip_count = sum(1 for r in all_results if r.get('status') == 'skip')
+            error_count = sum(1 for r in all_results if r.get('status') == 'error')
+            push.done({
+                'ok': True,
+                'summary': {
+                    'ok': ok_count,
+                    'skip': skip_count,
+                    'error': error_count,
+                    'total': len(all_results),
+                },
+                'results': all_results,
+            })
         except Exception as e:
             push.error(str(e))
         finally:
@@ -152,9 +167,63 @@ def run_analysis():
     return sse_response(gen)
 
 
+def _push_analysis_progress(push, *args):
+    """Normalize analyzer progress callbacks into user-readable SSE events."""
+    if len(args) == 5:
+        cid, group_name, status, current, total = args
+        if status == 'analyzing':
+            detail = f'准备分析「{group_name}」({current}/{total})'
+        elif status == 'done':
+            detail = f'「{group_name}」分析完成 ({current}/{total})'
+        elif status == 'skip':
+            detail = f'「{group_name}」已跳过：没有可分析内容 ({current}/{total})'
+        elif status == 'error':
+            detail = f'「{group_name}」分析失败 ({current}/{total})'
+        else:
+            detail = f'「{group_name}」{status} ({current}/{total})'
+        push('progress', detail, current / max(total, 1) * 0.9 + 0.1)
+        return
+
+    if len(args) == 6:
+        cid, group_name, status, current, total, msg_count = args
+        if status == 'summarizing':
+            detail = f'正在对「{group_name}」的 {msg_count} 条内容进行总结...'
+        elif status == 'extracting_artifact':
+            detail = f'正在提取「{group_name}」的结构化分析...'
+        elif status == 'verifying_evidence':
+            detail = f'正在校验「{group_name}」的证据来源...'
+        elif status == 'rendering_report':
+            detail = f'「{group_name}」发现 {msg_count} 个知识候选，正在生成报告...'
+        else:
+            detail = f'「{group_name}」{status}'
+        push('progress', detail, current / max(total, 1) * 0.9 + 0.1)
+
+
 # ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
+
+def _artifact_summary(storage: str, chat_id: str, date: str) -> dict:
+    artifact = load_artifact(storage, chat_id, date)
+    if not artifact:
+        return {
+            'artifact_status': 'missing',
+            'knowledge_candidate_count': 0,
+            'verify_status': 'missing',
+            'verify_pass_rate': None,
+        }
+    candidate_count = 0
+    for topic in artifact.get('topics') or []:
+        candidate_count += len(topic.get('knowledge_candidates') or [])
+    verify = artifact.get('verify') or {}
+    total = int(verify.get('total_evidence') or 0)
+    passed = int(verify.get('passed') or 0)
+    return {
+        'artifact_status': 'available',
+        'knowledge_candidate_count': candidate_count,
+        'verify_status': verify.get('status') or 'unverified',
+        'verify_pass_rate': round(passed / total, 3) if total else None,
+    }
 
 @analysis_bp.route('/results', methods=['GET'])
 def list_results():
@@ -174,6 +243,7 @@ def list_results():
                 results.append({
                     'chat_id': chat_dir, 'date': date,
                     'size': stat.st_size, 'mtime': stat.st_mtime,
+                    **_artifact_summary(storage, chat_dir, date),
                 })
     results.sort(key=lambda r: r['date'], reverse=True)
     return jsonify({'results': results})
@@ -191,6 +261,27 @@ def get_result(chat_id, date):
     return jsonify({'content': content})
 
 
+@analysis_bp.route('/result/<chat_id>/<date>/artifact', methods=['GET'])
+def get_result_artifact(chat_id, date):
+    artifact = load_artifact(_storage_dir(), chat_id, date)
+    if not artifact:
+        return jsonify({'ok': False, 'error': 'artifact not found'}), 404
+    return jsonify({'ok': True, 'artifact': artifact})
+
+
+@analysis_bp.route('/result/<chat_id>/<date>/knowledge-candidates/import', methods=['POST'])
+def import_result_knowledge_candidates(chat_id, date):
+    artifact = load_artifact(_storage_dir(), chat_id, date)
+    if not artifact:
+        return jsonify({'ok': False, 'error': 'artifact not found'}), 404
+    data = request.get_json(silent=True) or {}
+    min_score = int(data.get('min_score') or 80)
+    cards = knowledge_extractor.cards_from_analysis_artifact(artifact, min_score=min_score)
+    dbp = knowledge_store.knowledge_db_path(_decrypted_dir())
+    card_ids = [knowledge_store.save_card(dbp, card) for card in cards]
+    return jsonify({'ok': True, 'created': len(card_ids), 'card_ids': card_ids})
+
+
 @analysis_bp.route('/result/<chat_id>/<date>', methods=['DELETE'])
 def delete_result(chat_id, date):
     path = ai_analyzer.result_path(_storage_dir(), chat_id, date)
@@ -198,6 +289,9 @@ def delete_result(chat_id, date):
         return jsonify({'error': 'not found'}), 404
     try:
         os.remove(path)
+        apath = artifact_path(_storage_dir(), chat_id, date)
+        if os.path.isfile(apath):
+            os.remove(apath)
         return jsonify({'deleted': True})
     except OSError as e:
         return jsonify({'error': str(e)}), 500

@@ -62,6 +62,60 @@ def set_llm_config(llm_cfg: dict) -> None:
     _write_config(cfg)
 
 
+def get_group_blacklist() -> list:
+    """Return blacklisted group records from the ignored local config."""
+    items = _read_config().get("group_blacklist", [])
+    if not isinstance(items, list):
+        return []
+    normalized = []
+    seen = set()
+    for item in items:
+        if isinstance(item, str):
+            wxid = item.strip()
+            record = {"wxid": wxid, "display_name": wxid}
+        elif isinstance(item, dict):
+            wxid = str(item.get("wxid", "")).strip()
+            record = {
+                "wxid": wxid,
+                "display_name": str(item.get("display_name") or wxid),
+                "added_at": item.get("added_at", ""),
+            }
+        else:
+            continue
+        if not wxid or wxid in seen:
+            continue
+        seen.add(wxid)
+        normalized.append(record)
+    return normalized
+
+
+def set_group_blacklist(items: list) -> None:
+    """Persist blacklisted group records in the ignored local config."""
+    normalized = []
+    seen = set()
+    for item in items or []:
+        if isinstance(item, str):
+            wxid = item.strip()
+            display_name = wxid
+            added_at = ""
+        elif isinstance(item, dict):
+            wxid = str(item.get("wxid", "")).strip()
+            display_name = str(item.get("display_name") or wxid)
+            added_at = str(item.get("added_at") or "")
+        else:
+            continue
+        if not wxid or wxid in seen:
+            continue
+        seen.add(wxid)
+        record = {"wxid": wxid, "display_name": display_name}
+        if added_at:
+            record["added_at"] = added_at
+        normalized.append(record)
+    cfg = _read_config()
+    cfg["group_blacklist"] = normalized
+    _write_config(cfg)
+
+
 def get_backup_data_dir() -> str | None:
     """Return the output directory from the last successful backup, or None."""
     path = _config_path()

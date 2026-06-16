@@ -24,4 +24,9 @@ README-52.md
 # 个人数据 / 运行时产物
 .venv/
 avatar_cache/
-ai_analysis/
+# ai_analysis 整体忽略个人数据（config.json/styles/结果md/缓存），但保留代码资产子目录
+ai_analysis/*
+!ai_analysis/prompts/
+!ai_analysis/templates/
+!ai_analysis/prompts/.gitkeep
+!ai_analysis/templates/.gitkeep

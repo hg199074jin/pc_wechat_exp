@@ -2,12 +2,14 @@
 import json
 import os
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from engine.services.knowledge_extractor import (
     parse_llm_cards, build_knowledge_prompt, format_messages_for_knowledge,
     extract_cards_from_messages, build_convert_prompt, _extract_json_object,
+    make_llm_call, readable_message_text,
 )
 
 
@@ -58,6 +60,23 @@ def test_format_messages_includes_msg_ids():
     assert '[msg_id=123]' in text
     assert '张三' in text
     assert '这个可以做成SOP' in text
+
+
+def test_readable_message_text_extracts_xml_title():
+    xml = '<?xml version="1.0"?><msg><appmsg><title>我发现一个问题超过一定的问答量，就会开始慢</title><type>57</type></appmsg></msg>'
+    assert readable_message_text(xml) == '我发现一个问题超过一定的问答量，就会开始慢'
+
+
+def test_format_messages_extracts_link_title_from_xml():
+    messages = [{
+        'id': 123,
+        'create_time': 1781512345,
+        'sender_name': '张三',
+        'content': '<?xml version="1.0"?><msg><appmsg><title>只要这个标题</title></appmsg></msg>',
+    }]
+    text = format_messages_for_knowledge(messages)
+    assert '只要这个标题' in text
+    assert '<?xml' not in text
 
 
 def test_format_messages_skips_empty():
@@ -151,3 +170,28 @@ def test_extract_json_object_handles_no_fence():
     text = '  {"cards":[]}  '
     result = _extract_json_object(text)
     assert result == '{"cards":[]}'
+
+
+def test_extract_json_object_uses_first_complete_object():
+    text = '{"cards":[]}{"extra":true}'
+    result = _extract_json_object(text)
+    assert result == '{"cards":[]}'
+
+
+def test_parse_llm_cards_ignores_trailing_explanation():
+    raw = '{"cards":[{"title":"T","type":"note","score":80,"summary":"","why_valuable":"","content_md":"","tags":[],"source_msg_ids":[]}]}\\n说明：以上是结果'
+    cards = parse_llm_cards(raw, min_score=70)
+    assert len(cards) == 1
+    assert cards[0]['title'] == 'T'
+
+
+def test_make_llm_call_uses_configured_timeout():
+    with patch('engine.services.ai_analyzer.load_llm_config', return_value={
+        'base_url': 'https://api.example.com/v1',
+        'api_key': 'sk',
+        'model': 'm',
+        'timeout': 600,
+    }), patch('engine.services.ai_analyzer.call_llm', return_value='{"cards": []}') as mock_call:
+        llm_call = make_llm_call('dummy')
+        llm_call('system', 'user')
+    assert mock_call.call_args.kwargs['timeout'] == 600

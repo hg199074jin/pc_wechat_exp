@@ -23,6 +23,11 @@
 .group-item:hover { background: #21262d; }
 .group-item span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-meta { margin-left: auto; color: #8b949e; font-size: 12px; white-space: nowrap; }
+.blacklist-list { max-height: 360px; overflow-y: auto; border: 1px solid #30363d; border-radius: 6px; margin-top: 12px; }
+.blacklist-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #30363d; }
+.blacklist-row:last-child { border-bottom: 0; }
+.blacklist-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.blacklist-id { color: #8b949e; font-size: 11px; margin-top: 2px; }
 .text-input { width: 100%; padding: 6px 10px; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; box-sizing: border-box; }
 .btn-primary, .btn-secondary, .btn-tiny { padding: 6px 14px; border-radius: 4px; cursor: pointer; border: none; font-size: 14px; }
 .btn-primary { background: #58a6ff; color: #0d1117; }
@@ -57,6 +62,7 @@
 <div style="display:flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
   <h2 style="margin:0">🏷️ 群管理</h2>
   <div style="display:flex; gap:8px">
+    <button class="btn-secondary" id="blacklist-manage-btn">🚫 黑名单管理</button>
     <button class="btn-secondary" id="auto-classify-btn">🤖 AI 自动分类</button>
     <button class="btn-primary" id="save-btn">💾 保存修改</button>
   </div>
@@ -104,7 +110,19 @@
     <div style="margin-top:12px; padding-top:12px; border-top:1px solid #30363d; display:flex; gap:8px; align-items:center">
       <button class="btn-primary" id="move-selected-btn" disabled>📦 移动选中群到...</button>
       <select id="move-target" class="text-input" style="width:200px"></select>
+      <button class="btn-secondary" id="blacklist-selected-btn" disabled>🚫 加入黑名单</button>
       <span class="hint" id="move-hint">先在上方勾选群，再选择目标标签</span>
+    </div>
+  </div>
+</div>
+<!-- Blacklist modal -->
+<div class="modal" id="blacklist-modal" hidden>
+  <div class="modal-content" style="width:560px;max-width:90vw">
+    <h3 style="margin-top:0">黑名单管理</h3>
+    <p class="hint">黑名单中的群不会参与群管理加载和群名称解码。移出后会重新回到可加载范围。</p>
+    <div id="blacklist-items" class="blacklist-list"></div>
+    <div class="modal-actions">
+      <button class="btn-secondary" id="close-blacklist">关闭</button>
     </div>
   </div>
 </div>

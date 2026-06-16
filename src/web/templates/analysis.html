@@ -7,37 +7,28 @@
 .sidebar { display: flex; flex-direction: column; gap: 16px; }
 .main-area { min-width: 0; }
 .text-input { width: 100%; padding: 6px 10px; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; box-sizing: border-box; }
+.text-input:focus { outline: none; border-color: #58a6ff; box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.16); }
 .checkbox-list { max-height: 240px; overflow-y: auto; border: 1px solid #30363d; border-radius: 4px; padding: 4px; }
 .checkbox-item { display: flex; align-items: center; gap: 8px; padding: 4px; cursor: pointer; }
 .checkbox-item:hover { background: #161b22; }
-.group-picker { margin-top: 8px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; overflow: hidden; }
-.group-picker-v2 { max-height: none; padding: 0; }
-.group-picker-shell { display: grid; grid-template-columns: minmax(112px, 42%) minmax(0, 58%); min-height: 280px; max-height: 380px; }
-.group-picker-tags, .group-picker-groups { min-width: 0; overflow-y: auto; }
-.group-picker-tags { border-right: 1px solid #30363d; background: #0b1118; padding: 6px; }
-.group-picker-groups { padding: 8px; }
-.picker-pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; color: #8b949e; font-size: 12px; }
-.picker-pane-actions { display: flex; gap: 6px; }
-.picker-action { background: #161b22; color: #58a6ff; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; font-size: 12px; padding: 3px 7px; }
-.picker-action:hover { border-color: #58a6ff; }
-.group-picker-row { display: flex; align-items: center; min-height: 30px; gap: 8px; padding: 3px 6px; border-radius: 4px; box-sizing: border-box; }
-.group-picker-row input { flex: 0 0 auto; }
-.group-picker-row .label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.group-picker-row .count-badge { flex: 0 0 auto; font-size: 11px; color: #8b949e; background: #21262d; border: 1px solid #30363d; border-radius: 999px; padding: 1px 7px; }
-.group-picker-row.tag { color: #c9d1d9; cursor: pointer; }
-.group-picker-row.tag:hover, .group-picker-row.tag.active { background: #161b22; }
-.group-picker-row.tag.active { outline: 1px solid #30363d; }
-.group-picker-row.group { color: #c9d1d9; font-size: 12px; cursor: pointer; }
+.group-picker { margin-top: 8px; border: 1px solid #30363d; border-radius: 8px; background: #0d1117; overflow: hidden; width: 100%; box-sizing: border-box; }
+.group-picker-v2 { max-height: none; padding: 8px; }
+.group-picker-shell { display: flex; flex-direction: column; gap: 8px; width: 100%; min-width: 0; }
+.group-picker-category { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.group-picker-category select { height: 34px; }
+.group-picker-list { width: 100%; max-height: 300px; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; }
+.group-picker-row { display: flex; justify-content: flex-start; align-items: center; gap: 8px; height: 38px; padding: 0 10px; border-radius: 8px; box-sizing: border-box; width: 100%; min-width: 0; cursor: pointer; }
+.group-picker-row input[type="checkbox"] { flex: 0 0 14px; width: 14px; min-width: 14px; max-width: 14px; height: 14px; margin: 0; }
+.group-picker-row .label { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.group-picker-row.group { display: flex; justify-content: flex-start; align-items: center; margin: 0; color: #c9d1d9; font-size: 12px; }
 .group-picker-row.group:hover { background: #161b22; }
+.group-picker-row.group:has(input:checked) { background: rgba(88, 166, 255, 0.14); outline: 1px solid rgba(88, 166, 255, 0.28); }
 .group-picker-empty { color: #8b949e; font-size: 12px; line-height: 1.6; padding: 24px 10px; text-align: center; }
 .group-picker-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
 .group-picker-actions { display: flex; gap: 6px; }
+.group-picker-bulk-row { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
 .link-btn { background: transparent; border: 0; color: #58a6ff; cursor: pointer; font-size: 12px; padding: 2px 4px; text-decoration: none; }
 .link-btn:hover { text-decoration: underline; }
-@media (max-width: 900px) {
-  .group-picker-shell { grid-template-columns: 1fr; max-height: 520px; }
-  .group-picker-tags { border-right: 0; border-bottom: 1px solid #30363d; max-height: 180px; }
-}
 .btn-primary, .btn-secondary { padding: 8px 16px; border-radius: 4px; cursor: pointer; border: none; font-size: 14px; }
 .btn-primary { background: #58a6ff; color: #0d1117; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -88,6 +79,10 @@
           <a class="link-btn" href="/groups">群管理</a>
         </span>
       </div>
+      <div class="group-picker-bulk-row">
+        <button class="link-btn" id="select-visible-groups" type="button">全选</button>
+        <button class="link-btn" id="clear-visible-groups" type="button">清空</button>
+      </div>
       <div id="tag-tree" class="group-picker"></div>
     </div>
 
@@ -131,6 +126,7 @@
     <label>Model <input type="text" id="cfg-model" class="text-input" placeholder="gpt-4o"></label>
     <label>Temperature <input type="number" id="cfg-temperature" class="text-input" step="0.1" min="0" max="2" value="0.3"></label>
     <label>Max Tokens <input type="number" id="cfg-max-tokens" class="text-input" min="64" max="32000" value="4096"></label>
+    <label>Timeout 秒 <input type="number" id="cfg-timeout" class="text-input" min="15" max="600" value="120"></label>
     <div class="modal-actions">
       <button class="btn-secondary" id="test-connection">测试连接</button>
       <button class="btn-primary" id="save-config">保存</button>

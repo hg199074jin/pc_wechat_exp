@@ -11,6 +11,7 @@ const GroupsApp = {
   sortKey: 'name',
   sortDir: 'asc',
   loadWindowDays: '3',
+  blacklist: [],
   activityStatsLoaded: false,
   activityStatsLoading: false,
   dirty: false,
@@ -23,6 +24,7 @@ const GroupsApp = {
     this.loadWindowDays = localStorage.getItem('groups_load_window_days') || '3';
     this.ensureSortControls();
     this.bindEvents();
+    await this._loadBlacklist();
 
     const hasLocalCache = this._loadNameMapCache();
     this._updateLoading(
@@ -128,7 +130,7 @@ const GroupsApp = {
       const groups = Array.isArray(parsed.groups) ? parsed.groups : [];
       this._nameMap = parsed.map || {};
       this._rememberGroups(groups);
-      this._allGroups = this._filterByLoadWindow(groups.filter(g => g && g.wxid));
+      this._allGroups = this._filterByLoadWindow(this._filterBlacklisted(groups.filter(g => g && g.wxid)));
       return this._allGroups.length > 0;
     } catch (e) {
       return false;
@@ -182,13 +184,34 @@ const GroupsApp = {
     } catch (e) { /* ignore */ }
   },
 
+  _blacklistIds() {
+    return new Set((this.blacklist || []).map(g => g.wxid).filter(Boolean));
+  },
+
+  _filterBlacklisted(groups) {
+    const ids = this._blacklistIds();
+    if (!ids.size) return groups || [];
+    return (groups || []).filter(g => g && g.wxid && !ids.has(g.wxid));
+  },
+
+  async _loadBlacklist() {
+    try {
+      const r = await fetch('/api/address-book/groups/blacklist');
+      if (!r.ok) return;
+      const data = await r.json();
+      this.blacklist = data.blacklist || [];
+    } catch (e) {
+      console.error('_loadBlacklist failed:', e);
+    }
+  },
+
   async _loadTagsData() {
     try {
       const r = await fetch('/api/analysis/tags');
       if (!r.ok) return;
       const data = await r.json();
       this.tags = data.tags || [];
-      this.untagged = data.untagged || [];
+      this.untagged = this._filterBlacklisted(data.untagged || []);
       for (const g of this.untagged) {
         if (g.display_name) this._nameMap[g.wxid] = g.display_name;
       }
@@ -258,6 +281,8 @@ const GroupsApp = {
     div.dataset.path = pathStr;
     div.addEventListener('click', (e) => {
       e.stopPropagation();
+      const search = document.getElementById('group-search');
+      if (search) search.value = '';
       this.selectedTagPath = isUntagged ? null : pathStr;
       this.render();
     });
@@ -407,6 +432,12 @@ const GroupsApp = {
     const checked = document.querySelectorAll('#group-items input:checked');
     const btn = document.getElementById('move-selected-btn');
     if (btn) btn.disabled = checked.length === 0;
+    const blacklistBtn = document.getElementById('blacklist-selected-btn');
+    if (blacklistBtn) {
+      const isUntagged = this.selectedTagPath === null;
+      blacklistBtn.style.display = isUntagged ? '' : 'none';
+      blacklistBtn.disabled = !isUntagged || checked.length === 0;
+    }
     const hint = document.getElementById('move-hint');
     if (hint) hint.textContent = checked.length > 0 ? `已选 ${checked.length} 个群` : '先在上方勾选群，再选择目标标签';
   },
@@ -487,11 +518,14 @@ const GroupsApp = {
       const activity = !!options.activity;
       if (activity && this.activityStatsLoading) return;
       if (activity) this.activityStatsLoading = true;
-      const r = await fetch(`/api/address-book/groups?${this._loadWindowQuery(activity ? {activity: '1'} : {})}`);
+      const extra = {};
+      if (activity) extra.activity = '1';
+      if (options.force) extra.force = '1';
+      const r = await fetch(`/api/address-book/groups?${this._loadWindowQuery(extra)}`);
       if (!r.ok) return;
       const data = await r.json();
       if (!Array.isArray(data.groups)) return;
-      this._allGroups = data.groups;
+      this._allGroups = this._filterBlacklisted(data.groups);
       this._rememberGroups(this._allGroups);
       if (activity) this.activityStatsLoaded = true;
       this._saveNameMapCache();
@@ -582,11 +616,83 @@ const GroupsApp = {
     const tagged = this._collectTaggedChatIds();
     if (this._allGroups && this._allGroups.length) {
       this.untagged = this._allGroups
-        .filter(g => g && g.wxid && !tagged.has(g.wxid))
+        .filter(g => g && g.wxid && !tagged.has(g.wxid) && !this._blacklistIds().has(g.wxid))
         .map(g => this._groupRecord(g.wxid, this._nameMap[g.wxid] || g.display_name || g.wxid));
       return;
     }
-    this.untagged = (this.untagged || []).filter(g => !tagged.has(g.wxid));
+    const blocked = this._blacklistIds();
+    this.untagged = (this.untagged || []).filter(g => !tagged.has(g.wxid) && !blocked.has(g.wxid));
+  },
+
+  async _addSelectedToBlacklist() {
+    if (this.selectedTagPath !== null) return;
+    const checked = [...document.querySelectorAll('#group-items input:checked')].map(cb => cb.dataset.wxid);
+    if (checked.length === 0) { alert('请先勾选要加入黑名单的群'); return; }
+    if (!confirm(`将 ${checked.length} 个群加入黑名单？这些群之后不会参与群管理加载。`)) return;
+    const groups = checked.map(wxid => this._groupRecord(wxid));
+    try {
+      const r = await fetch('/api/address-book/groups/blacklist', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({groups}),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      this.blacklist = data.blacklist || [];
+      const ids = new Set(checked);
+      this._allGroups = (this._allGroups || []).filter(g => !ids.has(g.wxid));
+      this.untagged = (this.untagged || []).filter(g => !ids.has(g.wxid));
+      this._saveNameMapCache();
+      this.render();
+    } catch (e) {
+      alert('加入黑名单失败：' + e.message);
+    }
+  },
+
+  _renderBlacklistModal() {
+    const list = document.getElementById('blacklist-items');
+    if (!list) return;
+    if (!this.blacklist.length) {
+      list.innerHTML = '<div class="empty-state">黑名单为空</div>';
+      return;
+    }
+    list.innerHTML = '';
+    for (const item of this.blacklist) {
+      const row = document.createElement('div');
+      row.className = 'blacklist-row';
+      row.innerHTML = `
+        <div class="blacklist-name">
+          <div title="${this._esc(item.display_name || item.wxid)}">${this._esc(item.display_name || item.wxid)}</div>
+          <div class="blacklist-id">${this._esc(item.wxid || '')}</div>
+        </div>
+        <button class="btn-tiny btn-secondary" type="button" data-remove-blacklist="${this._esc(item.wxid || '')}">移出</button>`;
+      list.appendChild(row);
+    }
+  },
+
+  async _openBlacklistModal() {
+    await this._loadBlacklist();
+    this._renderBlacklistModal();
+    const modal = document.getElementById('blacklist-modal');
+    if (modal) modal.hidden = false;
+  },
+
+  async _removeFromBlacklist(wxid) {
+    if (!wxid) return;
+    try {
+      const r = await fetch(`/api/address-book/groups/blacklist?wxid=${encodeURIComponent(wxid)}`, {method: 'DELETE'});
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      this.blacklist = data.blacklist || [];
+      this._renderBlacklistModal();
+      const restored = this._groupRecord(wxid);
+      if (!this._allGroups.some(g => g.wxid === wxid)) this._allGroups.push(restored);
+      this._syncUntaggedWithTags();
+      this.render();
+      this._refreshGroupData({force: true, activity: this.sortKey === 'active_3d'}).catch(() => {});
+    } catch (e) {
+      alert('移出黑名单失败：' + e.message);
+    }
   },
 
   // ----- AI auto-classify -----
@@ -770,6 +876,22 @@ const GroupsApp = {
     document.getElementById('save-btn').onclick = () => this.save();
     document.getElementById('add-root-tag-btn').onclick = () => this._addRootTag();
     document.getElementById('group-search').oninput = () => this.renderCurrent();
+    const blacklistManageBtn = document.getElementById('blacklist-manage-btn');
+    if (blacklistManageBtn) blacklistManageBtn.onclick = () => this._openBlacklistModal();
+    const blacklistSelectedBtn = document.getElementById('blacklist-selected-btn');
+    if (blacklistSelectedBtn) blacklistSelectedBtn.onclick = () => this._addSelectedToBlacklist();
+    const closeBlacklistBtn = document.getElementById('close-blacklist');
+    if (closeBlacklistBtn) closeBlacklistBtn.onclick = () => {
+      const modal = document.getElementById('blacklist-modal');
+      if (modal) modal.hidden = true;
+    };
+    const blacklistItems = document.getElementById('blacklist-items');
+    if (blacklistItems) {
+      blacklistItems.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-remove-blacklist]');
+        if (btn) this._removeFromBlacklist(btn.dataset.removeBlacklist);
+      });
+    }
     const loadDays = document.getElementById('group-load-days');
     if (loadDays) {
       loadDays.value = this.loadWindowDays;
