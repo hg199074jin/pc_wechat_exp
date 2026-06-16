@@ -1057,7 +1057,9 @@ def _decrypt_dat_v2(file_path: str, aes_key: bytes, xor_key: int = None, output_
 
     # Convert wxgf (WeChat proprietary) to standard image if needed
     if result[:4] == b'wxgf':
-        result = _convert_wxgf(result) or result
+        converted = _convert_wxgf(result)
+        if converted:
+            result = converted
 
     import hashlib
     src_hash = hashlib.md5(file_path.encode()).hexdigest()[:12]
@@ -1071,52 +1073,155 @@ def _decrypt_dat_v2(file_path: str, aes_key: bytes, xor_key: int = None, output_
         return None
 
 
+def _find_wechat_install_dir() -> str:
+    """Auto-detect WeChat installation directory containing VoipEngine.dll.
+
+    Returns the directory containing Weixin.exe / VoipEngine.dll, or empty string.
+    """
+    # 1. Check common install paths
+    candidates = [
+        os.environ.get('WECHAT_INSTALL_DIR', ''),
+        r'D:\Tencent\Weixin',
+        r'D:\Program Files\Tencent\Weixin',
+        r'C:\Program Files\Tencent\Weixin',
+        r'C:\Program Files (x86)\Tencent\WeChat',
+        r'C:\Program Files\Tencent\WeChat',
+    ]
+    for base in candidates:
+        if not base or not os.path.isdir(base):
+            continue
+        # Look for VoipEngine.dll in the versioned subdirs (e.g. D:\Tencent\Weixin\4.1.9.30\)
+        for sub in os.listdir(base):
+            full = os.path.join(base, sub)
+            if os.path.isfile(os.path.join(full, 'VoipEngine.dll')):
+                return full
+        # Or in the base itself
+        if os.path.isfile(os.path.join(base, 'VoipEngine.dll')):
+            return base
+    return ''
+
+
+def _find_ffmpeg() -> str:
+    """Locate the ffmpeg executable. Returns the absolute path, or '' if not found.
+
+    Search order:
+      1. FFMPEG_BIN environment variable
+      2. shutil.which('ffmpeg')  (uses PATH)
+      3. Common install locations
+    """
+    import shutil
+    env = os.environ.get('FFMPEG_BIN', '').strip()
+    if env and os.path.isfile(env):
+        return env
+    p = shutil.which('ffmpeg')
+    if p:
+        return p
+    candidates = [
+        r'D:\ffmpeg\bin\ffmpeg.exe',       # FFmpeg 8.1+ (required for WxGF HEVC)
+        r'D:\Lily\ffmpeg.exe',             # older fallback
+        r'C:\ffmpeg\bin\ffmpeg.exe',
+        r'C:\Program Files\ffmpeg\bin\ffmpeg.exe',
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return ''
+
+
+def _extract_hevc_from_wxgf(data: bytes) -> bytes:
+    """Extract the raw HEVC bitstream from a WxGF/WXAM container.
+
+    The WxGF format wraps an HEVC-encoded still image with a variable-length
+    header (Magic/Version/Width/Height/Args + optional Extra Headers) followed
+    by Data Partitions containing standard HEVC Annex-B NALUs.
+
+    The WxGF header itself may contain bytes that look like HEVC start codes
+    (0x000001) but with invalid NALU types. To avoid mixing header data into
+    the HEVC stream, we first locate the first valid HEVC NALU (VPS type=32,
+    SPS type=33, or PPS type=34) and start extraction from there.
+
+    Returns the HEVC Annex-B bytes starting from the first valid NALU, or b''.
+    """
+    n = len(data)
+
+    # Find the first HEVC VPS/SPS/PPS start code.
+    # HEVC NALU type is in bits [1:6] of the byte after the start code.
+    # VPS=32 (0x40), SPS=33 (0x42), PPS=34 (0x44).
+    start = 0
+    for i in range(n - 4):
+        is_sc3 = (data[i:i+3] == b'\x00\x00\x01')
+        is_sc4 = (data[i:i+4] == b'\x00\x00\x00\x01')
+        if is_sc3 and not is_sc4:
+            nalu_type = (data[i+3] >> 1) & 0x3F
+            if nalu_type in (32, 33, 34):
+                start = i
+                break
+        elif is_sc4:
+            nalu_type = (data[i+4] >> 1) & 0x3F
+            if nalu_type in (32, 33, 34):
+                start = i
+                break
+
+    if start == 0:
+        return b''
+
+    # From start, collect all NALUs until end of data.
+    out = bytearray(data[start:])
+    return bytes(out)
+
+
 def _convert_wxgf(data: bytes) -> bytes:
-    """Convert WeChat wxgf image format to standard JPEG/PNG using native DLL."""
+    """Convert WeChat WxGF (HEVC-wrapped) image to standard JPEG.
+
+    The WxGF format is a WeChat-proprietary container holding an HEVC-encoded
+    still image. To convert, we extract the raw HEVC NALU bitstream and
+    transcode it to JPEG via ffmpeg (which is widely available and far more
+    portable than invoking WeChat's private VoipEngine.dll via ctypes).
+
+    Returns the JPEG bytes, or None on failure.
+    """
     if os.name != 'nt':
         return None
 
-    # Try to find VoipEngine.dll
-    dll_paths = [
-        os.path.join(os.path.dirname(__file__), 'native', 'VoipEngine.dll'),
-        r'D:\perl_wrk\PC_Wechat\WeChatDataAnalysis_ref\src\wechat_decrypt_tool\native\VoipEngine.dll',
-    ]
-    dll_path = None
-    for p in dll_paths:
-        if os.path.isfile(p):
-            dll_path = p
-            break
-    if not dll_path:
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
         return None
 
+    hevc = _extract_hevc_from_wxgf(data)
+    if not hevc or len(hevc) < 32:
+        return None
+
+    import subprocess
+    import tempfile
+
+    # Use NamedTemporaryFile so Windows ffmpeg can open the path. We do NOT
+    # delete the file on close because ffmpeg may still hold the handle
+    # on Windows. Cleanup is best-effort below.
+    with tempfile.NamedTemporaryFile(prefix='wxgf_', suffix='.hevc',
+                                     delete=False) as in_f:
+        in_path = in_f.name
+        in_f.write(hevc)
+    out_path = in_path[:-4] + '.png'
+
     try:
-        import ctypes
-
-        class _WxAMConfig(ctypes.Structure):
-            _fields_ = [('mode', ctypes.c_int), ('reserved', ctypes.c_int)]
-
-        voip = ctypes.WinDLL(dll_path)
-        fn = voip.wxam_dec_wxam2pic_5
-        fn.argtypes = [ctypes.c_int64, ctypes.c_int, ctypes.c_int64,
-                       ctypes.POINTER(ctypes.c_int), ctypes.c_int64]
-        fn.restype = ctypes.c_int64
-
-        max_out = 52 * 1024 * 1024
-        for mode in (0, 3):
-            config = _WxAMConfig()
-            config.mode = mode
-            config.reserved = 0
-            in_buf = ctypes.create_string_buffer(data, len(data))
-            out_buf = ctypes.create_string_buffer(max_out)
-            out_sz = ctypes.c_int(max_out)
-
-            ret = fn(ctypes.addressof(in_buf), len(data),
-                     ctypes.addressof(out_buf), ctypes.byref(out_sz),
-                     ctypes.addressof(config))
-            if ret == 0 and out_sz.value > 0:
-                return out_buf.raw[:out_sz.value]
-    except Exception:
+        proc = subprocess.run(
+            [ffmpeg, '-y', '-loglevel', 'error',
+             '-i', in_path,
+             '-frames:v', '1', '-update', '1',
+             out_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0 and os.path.isfile(out_path):
+            with open(out_path, 'rb') as f:
+                img = f.read()
+            if img[:4] == b'\x89PNG' or img[:3] == b'\xff\xd8\xff':
+                return img
+    except (subprocess.TimeoutExpired, OSError):
         pass
+    finally:
+        for p in (in_path, out_path):
+            try: os.unlink(p)
+            except OSError: pass
 
     return None
 

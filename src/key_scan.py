@@ -31,7 +31,7 @@ class MBI(ctypes.Structure):
     ]
 
 
-_KNOWN_EXE_NAMES = {'weixin.exe', 'wechat.exe'}
+_KNOWN_EXE_NAMES = {'weixin.exe', 'wechat.exe', 'wechatappex.exe'}
 
 
 def get_pids():
@@ -441,7 +441,8 @@ def run_key_scan(db_dir, out_file, print_fn=None, progress_fn=None):
 
     print_fn(f"找到 {len(db_files)} 个数据库, {len(salt_to_dbs)} 个不同的salt")
 
-    hex_re = re.compile(b"x'([0-9a-fA-F]{64,192})'")
+    # 4.1.10.31+ 改用裸 hex 字符串而非 SQL x'...' 包装；保留包装作为可选前缀以兼容旧版本
+    hex_re = re.compile(b"(?:x')?([0-9a-fA-F]{64,192})(?:')?")
     key_map = {}
     remaining_salts = set(salt_to_dbs.keys())
     all_hex_matches = 0

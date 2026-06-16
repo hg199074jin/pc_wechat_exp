@@ -2,7 +2,7 @@
 import os
 import sys
 import threading
-from flask import Blueprint, request, current_app
+from flask import Blueprint, request, current_app, jsonify
 
 _BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _BASE not in sys.path:
@@ -25,6 +25,32 @@ def _safe_path(user_input: str) -> str:
     return os.path.realpath(os.path.abspath(user_input))
 
 
+def _default_output_dir() -> str:
+    from engine.config_file import get_default_backup_root
+    configured = get_default_backup_root()
+    if configured:
+        return _safe_path(configured)
+    return os.path.join(_DATA_ROOT, 'backup')
+
+
+@backup_bp.route('/config', methods=['GET'])
+def backup_config_get():
+    """Return local backup preferences stored outside git."""
+    return jsonify({'default_output_dir': _default_output_dir()})
+
+
+@backup_bp.route('/config', methods=['PUT'])
+def backup_config_put():
+    """Update local backup preferences stored outside git."""
+    data = request.get_json(silent=True) or {}
+    output_dir = data.get('default_output_dir') or data.get('output_dir') or ''
+    if not output_dir:
+        return jsonify({'error': 'default_output_dir required'}), 400
+    from engine.config_file import set_default_backup_root
+    set_default_backup_root(_safe_path(output_dir))
+    return jsonify({'ok': True, 'default_output_dir': _safe_path(output_dir)})
+
+
 @backup_bp.route('/run', methods=['POST'])
 def backup_run():
     """POST /api/backup/run — Full backup pipeline."""
@@ -33,8 +59,7 @@ def backup_run():
     if data.get('output_dir'):
         output_dir = _safe_path(data['output_dir'])
     else:
-        import datetime as _dt
-        output_dir = os.path.join(_DATA_ROOT, 'backup', _dt.datetime.now().strftime('%Y-%m-%d'))
+        output_dir = _default_output_dir()
     key_file = _safe_path(data['key_file']) if data.get('key_file') else None
     start_date = data.get('start_date') or None
     end_date = data.get('end_date') or None

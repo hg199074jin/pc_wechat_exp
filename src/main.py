@@ -4,7 +4,7 @@ WeChat EXP — 微信聊天记录备份与查看工具
 Commands:
   backup    扫描、解密、迁移媒体、构建索引
   serve     启动 Web 聊天记录查看器
-  export    导出聊天记录 / 词云 / 报告 / 员工报表
+  export    导出聊天记录 / 报告 / 员工报表
 """
 import argparse
 import os
@@ -147,7 +147,7 @@ def cmd_backup(args):
         v2k = stats.get('v2_keys_harvested', 0)
         if v2k > 0:
             print(f"  V2 图片密钥: {v2k} 个（后台收割）")
-        # Persist the backup output directory for serve/report/wordcloud
+        # Persist the backup output directory for serve/report
         if os.path.isdir(os.path.join(output_dir, 'message')):
             wxid = result.get('wxid', '')
             set_backup_data_dir(output_dir, wxid=wxid)
@@ -180,10 +180,6 @@ def cmd_export(args):
     if mode == 'chat':
         from chat_export import export_all_contacts
         export_all_contacts()
-    elif mode == 'wordcloud':
-        from wordcloud_gen import generate_wordcloud
-        decrypted = args.decrypted_dir or _resolve_decrypted_dir()
-        generate_wordcloud(decrypted, chat_info=args.chat, out_path=args.output)
     elif mode == 'report':
         from report_gen import generate_report
         decrypted = args.decrypted_dir or _resolve_decrypted_dir()
@@ -324,7 +320,7 @@ def _cmd_quick(args):
         return
 
     host = '127.0.0.1'
-    port = 5000
+    port = 5051
     if args.contact:
         from urllib.parse import quote
         chat_url = f'http://{host}:{port}/chat?contact={quote(args.contact)}'
@@ -371,14 +367,13 @@ def main():
     sp.add_argument('--decrypted-dir', help='解密后的数据目录')
     sp.add_argument('--db-dir', help='微信 db_storage 目录 (用于媒体解析)')
     sp.add_argument('--host', default='127.0.0.1')
-    sp.add_argument('--port', type=int, default=5000)
+    sp.add_argument('--port', type=int, default=5051)
 
     # export
     ep = sub.add_parser('export', help='导出聊天记录')
     ep.add_argument('--mode', '-m', required=True,
-                    choices=['chat', 'wordcloud', 'report', 'employee', 'list', 'keys', 'decrypt'],
+                    choices=['chat', 'report', 'employee', 'list', 'keys', 'decrypt'],
                     help='导出模式')
-    ep.add_argument('--chat', help='指定聊天对象 (wordcloud 模式)')
     ep.add_argument('--output', '-o', help='输出路径')
     ep.add_argument('--excel', help='员工 Excel 文件路径 (employee 模式)')
     ep.add_argument('--decrypted-dir', help='解密后的数据目录')
@@ -401,7 +396,7 @@ def main():
             print("启动 Web 管理面板...")
             print("提示: 使用 python main.py --help 查看所有可用命令")
             cmd_serve(argparse.Namespace(
-                decrypted_dir=None, db_dir=None, host='127.0.0.1', port=5000))
+                decrypted_dir=None, db_dir=None, host='127.0.0.1', port=5051))
         return
     elif args.command == 'backup':
         cmd_backup(args)

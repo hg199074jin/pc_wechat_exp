@@ -1,4 +1,4 @@
-"""Export API — SSE-streaming endpoints for chat export, wordcloud, report, employee."""
+"""Export API — SSE-streaming endpoints for chat export, report, employee."""
 import hashlib
 import os
 import re
@@ -235,119 +235,11 @@ def export_chat():
     return sse_response(gen)
 
 
-@export_bp.route('/wordcloud/view/<path:filename>')
-def view_wordcloud(filename):
-    """GET /api/export/wordcloud/view/<filename> — Serve a generated wordcloud HTML."""
-    out_dir = os.path.join(_DATA_ROOT, 'export', 'wordcloud')
-    return send_from_directory(os.path.normpath(out_dir), filename)
-
-
 @export_bp.route('/download/<path:filename>')
 def download_file(filename):
     """GET /api/export/download/<filename> — Serve an exported file."""
     out_dir = os.path.join(_DATA_ROOT, 'export')
     return send_from_directory(os.path.normpath(out_dir), filename, as_attachment=True)
-
-
-@export_bp.route('/wordcloud', methods=['POST'])
-def export_wordcloud():
-    """POST /api/export/wordcloud — Generate word cloud."""
-    data = request.get_json(silent=True) or {}
-    chat = data.get('chat', '')
-    try:
-        year = int(data.get('year', datetime.now().year))
-    except (TypeError, ValueError):
-        year = datetime.now().year
-
-    decrypted_dir = _decrypted_dir()
-    push, gen = create_sse_progress()
-
-    def _run():
-        try:
-            from wordcloud_gen import generate_wordcloud, extract_text_messages
-            from chat_list import scan_chats
-            from engine.constants import TZ
-
-            push('analyze', '正在扫描聊天数据...', 0.1)
-
-            chat_info = None
-            if chat:
-                all_chats, _, _ = scan_chats(decrypted_dir)
-                if not all_chats:
-                    # Flat backup layout (no contact/session subdirs) —
-                    # scan Name2Id from message DBs directly
-                    all_chats = _scan_chats_flat(decrypted_dir, chat)
-                # Exact match first
-                for c in all_chats:
-                    if c['username'] == chat or c['display_name'] == chat:
-                        chat_info = c
-                        break
-                # Fuzzy match: collect all matches, let user pick
-                if not chat_info:
-                    chat_lower = chat.lower()
-                    fuzzy_matches = []
-                    for c in all_chats:
-                        if (chat_lower in c['display_name'].lower()
-                                or chat_lower in c['username'].lower()):
-                            fuzzy_matches.append({
-                                'username': c['username'],
-                                'display_name': c['display_name'],
-                                'msg_count': c.get('msg_count', 0),
-                            })
-                    if not fuzzy_matches:
-                        push.error(f'未找到匹配的聊天: {chat}')
-                        return
-                    if len(fuzzy_matches) == 1:
-                        # Single match — auto-select
-                        m = fuzzy_matches[0]
-                        for c in all_chats:
-                            if c['username'] == m['username']:
-                                chat_info = c
-                                break
-                    else:
-                        push.select(fuzzy_matches)
-                        return
-
-            start_ts = int(datetime(year, 1, 1, tzinfo=TZ).timestamp())
-            end_ts = int(datetime(year + 1, 1, 1, tzinfo=TZ).timestamp()) - 1
-
-            push('analyze', f'正在提取 {year} 年文本...', 0.3)
-            text, msg_count = extract_text_messages(decrypted_dir, chat_info=chat_info,
-                                                     start_ts=start_ts, end_ts=end_ts)
-
-            if msg_count == 0:
-                # Year filter may exclude all data — retry without time filter
-                push('analyze', f'{year} 年无数据，正在全时段提取...', 0.35)
-                text, msg_count = extract_text_messages(decrypted_dir, chat_info=chat_info,
-                                                         start_ts=None, end_ts=None)
-                year_ts = (None, None)
-            else:
-                year_ts = (start_ts, end_ts)
-
-            push('analyze', f'提取到 {msg_count} 条消息', 0.5)
-
-            out_dir = os.path.join(_DATA_ROOT, 'export', 'wordcloud')
-            os.makedirs(out_dir, exist_ok=True)
-            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-            out_file = os.path.join(out_dir, f'wordcloud_{ts}.html')
-            def _print(msg):
-                push('analyze', str(msg), 0.6)
-
-            result = generate_wordcloud(decrypted_dir, chat_info=chat_info,
-                                        out_path=out_file, start_ts=year_ts[0], end_ts=year_ts[1],
-                                        print_fn=_print)
-
-            if result:
-                fname = os.path.basename(result)
-                view_url = f'/api/export/wordcloud/view/{fname}'
-                push.done({'msg_count': msg_count, 'view_url': view_url, 'filename': fname})
-            else:
-                push.error('词云生成失败，未找到足够的文本消息')
-        except Exception as e:
-            push.error(str(e))
-
-    threading.Thread(target=_run, daemon=True).start()
-    return sse_response(gen)
 
 
 @export_bp.route('/report/view/<path:filename>')

@@ -18,7 +18,7 @@
 <div class="config-panel">
   <div class="form-row">
     <div style="flex:2"><label>微信数据目录 (db_storage)</label><input id="cfg-db-dir" placeholder="例如: D:\xwechat_files\wxid_xxx\db_storage"></div>
-    <div style="flex:2"><label>备份输出目录</label><input id="cfg-output" placeholder="例如: D:\WeChat_Backup\2026-05-18"></div>
+    <div style="flex:2"><label>备份输出目录</label><input id="cfg-output" placeholder="从本机私有配置读取"></div>
     <div><label>&nbsp;</label><button id="btn-run" class="btn btn-primary">开始备份</button></div>
   </div>
   <div class="form-row" style="margin-top:8px">
@@ -76,6 +76,34 @@ const page = new WizardPage({
     return body;
   },
 });
+
+async function loadBackupConfig() {
+  try {
+    const r = await fetch('/api/backup/config');
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data.default_output_dir) {
+      document.getElementById('cfg-output').value = data.default_output_dir;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+let saveBackupConfigTimer = null;
+function scheduleBackupConfigSave() {
+  if (saveBackupConfigTimer) clearTimeout(saveBackupConfigTimer);
+  saveBackupConfigTimer = setTimeout(() => {
+    const outputDir = document.getElementById('cfg-output').value.trim();
+    if (!outputDir) return;
+    fetch('/api/backup/config', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({default_output_dir: outputDir}),
+    }).catch(() => {});
+  }, 500);
+}
+
+loadBackupConfig();
+document.getElementById('cfg-output').addEventListener('change', scheduleBackupConfigSave);
 
 // Override showResult to display stats
 const origShowResult = page.showResult.bind(page);

@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}群管理 — WeChat EXP{% endblock %}
+{% block head %}
+<style>
+.page-layout { display: grid; grid-template-columns: 320px 1fr; gap: 20px; min-height: calc(100vh - 120px); }
+.tag-tree { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px; overflow-y: auto; max-height: 70vh; }
+.tag-node { padding: 4px 0; cursor: pointer; user-select: none; }
+.tag-node .name { display: inline-block; padding: 2px 6px; border-radius: 3px; }
+.tag-node .name:hover { background: #21262d; }
+.tag-node.selected .name { background: #1f6feb; color: #fff; }
+.tag-node .count { color: #8b949e; font-size: 12px; margin-left: 6px; }
+.tag-node .children { padding-left: 18px; }
+.tag-actions { margin-top: 16px; display: flex; gap: 8px; }
+.group-list { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px; min-height: 70vh; }
+.group-list .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.group-list .search { width: min(260px, 100%); }
+.group-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.group-load-controls { display: flex; align-items: center; gap: 8px; color: #8b949e; font-size: 12px; margin-bottom: 8px; }
+.group-load-controls .text-input { width: 150px; }
+.group-sort-controls { display: flex; gap: 8px; align-items: center; }
+.group-sort-controls .text-input { width: 130px; }
+.group-item { display: flex; align-items: center; padding: 4px; gap: 8px; }
+.group-item:hover { background: #21262d; }
+.group-item span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-meta { margin-left: auto; color: #8b949e; font-size: 12px; white-space: nowrap; }
+.text-input { width: 100%; padding: 6px 10px; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; box-sizing: border-box; }
+.btn-primary, .btn-secondary, .btn-tiny { padding: 6px 14px; border-radius: 4px; cursor: pointer; border: none; font-size: 14px; }
+.btn-primary { background: #58a6ff; color: #0d1117; }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+.btn-tiny { padding: 2px 8px; font-size: 12px; }
+.btn-danger { color: #f85149; border-color: #f85149; }
+.context-menu { position: absolute; background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 4px 0; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+.context-menu .item { padding: 6px 16px; cursor: pointer; }
+.context-menu .item:hover { background: #1f6feb; color: #fff; }
+.empty-state { color: #8b949e; text-align: center; padding: 40px; }
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal[hidden] { display: none; }
+.modal-content { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 24px; width: 400px; }
+.modal-content label { display: block; margin-bottom: 12px; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.progress-bar { height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; margin: 12px 0; }
+.progress-fill { height: 100%; background: #58a6ff; width: 0; transition: width 0.3s; }
+.hint { color: #8b949e; font-size: 12px; }
+</style>
+{% endblock %}
+{% block content %}
+<div id="loading-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:9999">
+  <div style="text-align:center;color:#c9d1d9">
+    <div style="font-size:24px;margin-bottom:12px">⏳</div>
+    <div id="loading-text">正在加载群列表...</div>
+    <div style="margin-top:12px;width:200px;height:4px;background:#30363d;border-radius:2px;overflow:hidden">
+      <div id="loading-bar" style="height:100%;background:#58a6ff;width:30%;transition:width 0.3s"></div>
+    </div>
+  </div>
+</div>
+<div style="display:flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+  <h2 style="margin:0">🏷️ 群管理</h2>
+  <div style="display:flex; gap:8px">
+    <button class="btn-secondary" id="auto-classify-btn">🤖 AI 自动分类</button>
+    <button class="btn-primary" id="save-btn">💾 保存修改</button>
+  </div>
+</div>
+<div class="page-layout">
+  <div>
+    <div class="tag-tree" id="tag-tree"></div>
+    <div class="tag-actions">
+      <button class="btn-secondary btn-tiny" id="add-root-tag-btn">+ 新建一级标签</button>
+    </div>
+  </div>
+  <div class="group-list">
+    <div class="header">
+      <div>
+        <strong id="current-tag-name">未分类</strong>
+        <span class="hint" id="current-tag-count"></span>
+      </div>
+      <div class="group-controls">
+        <input type="text" class="text-input search" id="group-search" placeholder="搜索群名称...">
+        <div class="group-sort-controls">
+          <select id="group-sort-key" class="text-input">
+            <option value="name">按名称</option>
+            <option value="last_time">按最近对话</option>
+            <option value="active_3d">按近3天活跃度</option>
+          </select>
+          <select id="group-sort-dir" class="text-input">
+            <option value="asc">正序</option>
+            <option value="desc">倒序</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <div class="group-load-controls">
+      <span>加载范围</span>
+      <select id="group-load-days" class="text-input">
+        <option value="1">最近1天有会话</option>
+        <option value="3" selected>最近3天有会话</option>
+        <option value="7">最近7天有会话</option>
+        <option value="30">最近30天有会话</option>
+        <option value="0">全部群</option>
+      </select>
+      <span class="hint">减少无价值旧群，加快加载</span>
+    </div>
+    <div id="group-items"></div>
+    <div style="margin-top:12px; padding-top:12px; border-top:1px solid #30363d; display:flex; gap:8px; align-items:center">
+      <button class="btn-primary" id="move-selected-btn" disabled>📦 移动选中群到...</button>
+      <select id="move-target" class="text-input" style="width:200px"></select>
+      <span class="hint" id="move-hint">先在上方勾选群，再选择目标标签</span>
+    </div>
+  </div>
+</div>
+<!-- Progress modal -->
+<div class="modal" id="progress-modal" hidden>
+  <div class="modal-content">
+    <h3 id="progress-title" style="margin-top:0">AI 自动分类中...</h3>
+    <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+    <p class="hint" id="progress-text"></p>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/groups-app.js') }}"></script>
+{% endblock %}

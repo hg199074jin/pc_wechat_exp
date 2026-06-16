@@ -1,0 +1,674 @@
+/**
+ * AI 群聊分析页面逻辑.
+ * 依赖: marked.js (CDN), 原生 fetch API.
+ */
+const AnalysisApp = {
+  schedules: [],
+  results: [],
+  currentScheduleId: null,
+  tags: [],
+  untagged: [],
+  groupNameMap: {},
+  selectedChatIds: new Set(),
+  activeTagPath: '',
+  groupSearchQuery: '',
+
+  init() {
+    this.loadGroupNameCache();
+    this.ensureGroupPickerUi();
+    this.ensureDateQuickControls();
+    this.loadConfig();
+    this.loadTagTree();
+    this.loadResults();
+    this.loadSchedules();
+    this.bindEvents();
+  },
+
+  ensureDateQuickControls() {
+    if (document.getElementById('date-quick-actions')) return;
+    const dateTo = document.getElementById('date-to');
+    if (!dateTo || !dateTo.parentNode) return;
+    const actions = document.createElement('div');
+    actions.id = 'date-quick-actions';
+    actions.className = 'date-quick-actions';
+    actions.innerHTML = `
+      <button class="btn-tiny" type="button" data-days="1">最近1天</button>
+      <button class="btn-tiny" type="button" data-days="3">最近3天</button>
+      <button class="btn-tiny" type="button" data-days="7">最近7天</button>`;
+    dateTo.parentNode.appendChild(actions);
+
+    if (!document.getElementById('analysis-date-quick-style')) {
+      const style = document.createElement('style');
+      style.id = 'analysis-date-quick-style';
+      style.textContent = `
+        .date-quick-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+        .date-quick-actions .btn-tiny { flex: 1 1 72px; }
+      `;
+      document.head.appendChild(style);
+    }
+  },
+
+  setQuickDateRange(days) {
+    const n = Math.max(1, parseInt(days, 10) || 1);
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - n + 1);
+    document.getElementById('date-from').value = start.toISOString().slice(0, 10);
+    document.getElementById('date-to').value = end.toISOString().slice(0, 10);
+  },
+
+  ensureGroupPickerUi() {
+    if (!document.getElementById('analysis-group-picker-style')) {
+      const style = document.createElement('style');
+      style.id = 'analysis-group-picker-style';
+      style.textContent = `
+        .group-picker { margin-top: 8px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; overflow: hidden; }
+        .group-picker-v2 { max-height: none; padding: 0; }
+        .group-picker-shell { display: grid; grid-template-columns: minmax(112px, 42%) minmax(0, 58%); min-height: 280px; max-height: 380px; }
+        .group-picker-tags, .group-picker-groups { min-width: 0; overflow-y: auto; }
+        .group-picker-tags { border-right: 1px solid #30363d; background: #0b1118; padding: 6px; }
+        .group-picker-groups { padding: 8px; }
+        .picker-pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; color: #8b949e; font-size: 12px; }
+        .picker-pane-actions { display: flex; gap: 6px; }
+        .picker-action { background: #161b22; color: #58a6ff; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; font-size: 12px; padding: 3px 7px; }
+        .picker-action:hover { border-color: #58a6ff; }
+        .group-picker-row { display: flex; align-items: center; min-height: 30px; gap: 8px; padding: 3px 6px; border-radius: 4px; box-sizing: border-box; }
+        .group-picker-row input { flex: 0 0 auto; }
+        .group-picker-row .label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .group-picker-row .count-badge { flex: 0 0 auto; font-size: 11px; color: #8b949e; background: #21262d; border: 1px solid #30363d; border-radius: 999px; padding: 1px 7px; }
+        .group-picker-row.tag { color: #c9d1d9; cursor: pointer; }
+        .group-picker-row.tag:hover, .group-picker-row.tag.active { background: #161b22; }
+        .group-picker-row.tag.active { outline: 1px solid #30363d; }
+        .group-picker-row.group { color: #c9d1d9; font-size: 12px; cursor: pointer; }
+        .group-picker-row.group:hover { background: #161b22; }
+        .group-picker-empty { color: #8b949e; font-size: 12px; line-height: 1.6; padding: 24px 10px; text-align: center; }
+        .group-picker-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+        .group-picker-actions { display: flex; gap: 6px; }
+        .link-btn { background: transparent; border: 0; color: #58a6ff; cursor: pointer; font-size: 12px; padding: 2px 4px; text-decoration: none; }
+        .link-btn:hover { text-decoration: underline; }
+        @media (max-width: 900px) {
+          .group-picker-shell { grid-template-columns: 1fr; max-height: 520px; }
+          .group-picker-tags { border-right: 0; border-bottom: 1px solid #30363d; max-height: 180px; }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    const tree = document.getElementById('tag-tree');
+    if (!tree) return;
+    tree.className = 'group-picker';
+    if (!document.getElementById('selected-group-count')) {
+      const toolbar = document.createElement('div');
+      toolbar.className = 'group-picker-toolbar';
+      toolbar.innerHTML = `
+        <span class="hint" id="selected-group-count">已选 0 个群</span>
+        <span class="group-picker-actions">
+          <button class="link-btn" id="refresh-groups" type="button">刷新</button>
+          <a class="link-btn" href="/groups">群管理</a>
+        </span>`;
+      tree.parentNode.insertBefore(toolbar, tree);
+    }
+  },
+
+  // -------------------------------------------------------------------
+  // Config
+  // -------------------------------------------------------------------
+  async loadConfig() {
+    try {
+      const r = await fetch('/api/analysis/config');
+      const data = await r.json();
+      const cfg = data.llm || {};
+      document.getElementById('cfg-base-url').value = cfg.base_url || '';
+      document.getElementById('cfg-api-key').value = cfg.api_key || '';
+      document.getElementById('cfg-model').value = cfg.model || '';
+      document.getElementById('cfg-temperature').value = cfg.temperature || 0.3;
+      document.getElementById('cfg-max-tokens').value = cfg.max_tokens || 4096;
+      document.getElementById('llm-status').textContent =
+        cfg.base_url ? `当前: ${cfg.model || '?'} @ ${cfg.base_url}` : '未配置';
+    } catch (e) { /* ignore */ }
+  },
+
+  async saveConfig() {
+    const llm = {
+      base_url: document.getElementById('cfg-base-url').value.trim(),
+      api_key: document.getElementById('cfg-api-key').value.trim(),
+      model: document.getElementById('cfg-model').value.trim(),
+      temperature: parseFloat(document.getElementById('cfg-temperature').value) || 0.3,
+      max_tokens: parseInt(document.getElementById('cfg-max-tokens').value, 10) || 4096,
+    };
+    if (!llm.base_url || !llm.api_key || !llm.model) {
+      alert('请填写完整 LLM 配置'); return;
+    }
+    const r = await fetch('/api/analysis/config', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({llm}),
+    });
+    if (r.ok) {
+      document.getElementById('settings-modal').hidden = true;
+      this.loadConfig();
+    } else { alert('保存失败'); }
+  },
+
+  async testConnection() {
+    const out = document.getElementById('test-result');
+    out.textContent = '测试中...';
+    try {
+      const r = await fetch('/api/analysis/test', {method: 'POST'});
+      const data = await r.json();
+      out.textContent = data.ok ? `✅ 成功: ${data.reply || ''}` : `❌ 失败: ${data.error}`;
+    } catch (e) { out.textContent = `❌ 请求失败: ${e.message}`; }
+  },
+
+  // -------------------------------------------------------------------
+  // Tag tree (replaces flat group list)
+  // -------------------------------------------------------------------
+  async loadTagTree() {
+    try {
+      const r = await fetch('/api/analysis/tags');
+      const data = await r.json();
+      this.tags = data.tags || [];
+      this.untagged = data.untagged || [];
+      (this.untagged || []).forEach(g => {
+        if (g.wxid) this.groupNameMap[g.wxid] = g.display_name || g.wxid;
+      });
+      this.renderTagTree();
+      this.loadGroupNames();
+    } catch (e) { /* ignore */ }
+  },
+
+  loadGroupNameCache() {
+    try {
+      const raw = localStorage.getItem('wechat_group_names');
+      if (!raw) return;
+      const cached = JSON.parse(raw);
+      if (!cached || !Array.isArray(cached.groups)) return;
+      cached.groups.forEach(g => {
+        if (g && g.wxid) this.groupNameMap[g.wxid] = g.display_name || g.wxid;
+      });
+    } catch (e) { /* ignore */ }
+  },
+
+  async loadGroupNames() {
+    try {
+      const r = await fetch('/api/address-book/groups');
+      if (!r.ok) return;
+      const data = await r.json();
+      (data.groups || []).forEach(g => {
+        if (g.wxid) this.groupNameMap[g.wxid] = g.display_name || g.wxid;
+      });
+      this.renderTagTree();
+      this.renderResults();
+    } catch (e) { /* ignore */ }
+  },
+
+  renderTagTree() {
+    const root = document.getElementById('tag-tree');
+    if (!root) return;
+    root.className = 'group-picker group-picker-v2';
+    root.innerHTML = '';
+    this._syncSelectionWithTags();
+    const tagItems = this._flattenTags(this.tags);
+    if (!tagItems.length) {
+      root.innerHTML = '<div class="group-picker-empty">还没有已分类标签，请先到“群管理”给群聊打标签。</div>';
+      this.updateSelectedCount();
+      return;
+    }
+    if (!this.activeTagPath || !tagItems.some(item => item.pathStr === this.activeTagPath)) {
+      const firstWithGroups = tagItems.find(item => item.count > 0) || tagItems[0];
+      this.activeTagPath = firstWithGroups.pathStr;
+    }
+
+    const shell = document.createElement('div');
+    shell.className = 'group-picker-shell';
+    shell.appendChild(this._renderTagPane(tagItems));
+    shell.appendChild(this._renderGroupPane());
+    root.appendChild(shell);
+    this._updateTagCheckboxStates();
+    this.updateSelectedCount();
+  },
+
+  _renderTagPane(tagItems) {
+    const pane = document.createElement('div');
+    pane.className = 'group-picker-tags';
+    for (const item of tagItems) pane.appendChild(this._renderTagRow(item));
+    return pane;
+  },
+
+  _renderTagRow(item) {
+    const row = document.createElement('div');
+    row.className = 'group-picker-row tag';
+    if (item.pathStr === this.activeTagPath && !this.groupSearchQuery) row.classList.add('active');
+    row.style.paddingLeft = (6 + item.depth * 14) + 'px';
+    row.dataset.tagPath = item.pathStr;
+    row.dataset.searchText = `${item.label} ${item.count}`.toLowerCase();
+    row.innerHTML = `
+      <input type="checkbox" data-tag-path="${this._esc(item.pathStr)}" aria-label="选择 ${this._esc(item.label)}">
+      <span class="label" title="${this._esc(item.pathStr)}">${this._esc(item.tag.name)}</span>
+      <span class="count-badge">${item.count}</span>`;
+    row.querySelector('input').addEventListener('change', (e) => {
+      this._setTagSelection(item.pathStr, e.target.checked);
+      this._updateTagCheckboxStates();
+      this.updateSelectedCount();
+    });
+    row.addEventListener('click', (e) => {
+      if (e.target.matches('input')) return;
+      this.activeTagPath = item.pathStr;
+      this.groupSearchQuery = '';
+      const search = document.getElementById('group-search');
+      if (search) search.value = '';
+      this.renderTagTree();
+    });
+    return row;
+  },
+
+  _renderGroupPane() {
+    const pane = document.createElement('div');
+    pane.className = 'group-picker-groups';
+    const q = this.groupSearchQuery.trim().toLowerCase();
+    const rows = q ? this._searchClassifiedGroups(q) : this._groupsForPath(this.activeTagPath);
+    const currentLabel = q ? `搜索结果` : (this.activeTagPath || '请选择标签');
+
+    const head = document.createElement('div');
+    head.className = 'picker-pane-head';
+    head.innerHTML = `
+      <span>${this._esc(currentLabel)} · ${rows.length} 个群</span>
+      <span class="picker-pane-actions">
+        <button class="picker-action" type="button" data-select-current>全选</button>
+        <button class="picker-action" type="button" data-clear-current>清空</button>
+      </span>`;
+    head.querySelector('[data-select-current]').onclick = () => {
+      rows.forEach(g => this.selectedChatIds.add(g.wxid));
+      this.renderTagTree();
+    };
+    head.querySelector('[data-clear-current]').onclick = () => {
+      rows.forEach(g => this.selectedChatIds.delete(g.wxid));
+      this.renderTagTree();
+    };
+    pane.appendChild(head);
+
+    if (!rows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'group-picker-empty';
+      empty.textContent = q ? '没有匹配的已分类群。' : '这个标签下还没有群。';
+      pane.appendChild(empty);
+      return pane;
+    }
+
+    for (const g of rows) pane.appendChild(this._renderGroupRow(g.wxid, g.pathStr));
+    return pane;
+  },
+
+  _renderGroupRow(chatId, pathStr = '') {
+    const label = this.groupNameMap[chatId] || chatId;
+    const row = document.createElement('label');
+    row.className = 'group-picker-row group';
+    row.dataset.searchText = `${label} ${chatId} ${pathStr}`.toLowerCase();
+    row.innerHTML = `
+      <input type="checkbox" data-chat-id="${this._esc(chatId)}" ${this.selectedChatIds.has(chatId) ? 'checked' : ''}>
+      <span class="label" title="${this._esc(chatId)}">${this._esc(label)}</span>`;
+    row.querySelector('input').addEventListener('change', (e) => {
+      if (e.target.checked) this.selectedChatIds.add(chatId);
+      else this.selectedChatIds.delete(chatId);
+      this._updateTagCheckboxStates();
+      this.updateSelectedCount();
+    });
+    return row;
+  },
+
+  _flattenTags(tags, depth = 0, prefix = [], out = []) {
+    for (const tag of tags || []) {
+      const path = [...prefix, tag.name];
+      const pathStr = path.join('/');
+      out.push({tag, path, pathStr, depth, label: pathStr, count: this._countInTag(tag)});
+      this._flattenTags(tag.children || [], depth + 1, path, out);
+    }
+    return out;
+  },
+
+  _countInTag(tag) {
+    let n = (tag.chat_ids || []).length;
+    for (const c of tag.children || []) n += this._countInTag(c);
+    return n;
+  },
+
+  _findTagByPath(tags, pathArr) {
+    if (!pathArr || pathArr.length === 0) return null;
+    const [name, ...rest] = pathArr;
+    for (const t of tags) {
+      if (t.name === name) return rest.length === 0 ? t : this._findTagByPath(t.children || [], rest);
+    }
+    return null;
+  },
+
+  _collectIdsFromTag(tag, ids) {
+    (tag.chat_ids || []).forEach(c => ids.add(c));
+    (tag.children || []).forEach(c => this._collectIdsFromTag(c, ids));
+  },
+
+  _groupsForPath(pathStr) {
+    const tag = this._findTagByPath(this.tags, (pathStr || '').split('/').filter(Boolean));
+    if (!tag) return [];
+    const rows = [];
+    this._collectGroupRows(tag, pathStr, rows, new Set());
+    return rows;
+  },
+
+  _collectGroupRows(tag, pathStr, rows, seen) {
+    (tag.chat_ids || []).forEach(cid => {
+      if (seen.has(cid)) return;
+      seen.add(cid);
+      rows.push({wxid: cid, display_name: this.groupNameMap[cid] || cid, pathStr});
+    });
+    (tag.children || []).forEach(child => {
+      const childPath = pathStr ? `${pathStr}/${child.name}` : child.name;
+      this._collectGroupRows(child, childPath, rows, seen);
+    });
+  },
+
+  _allClassifiedGroups() {
+    const rows = [];
+    const seen = new Set();
+    for (const item of this._flattenTags(this.tags)) {
+      (item.tag.chat_ids || []).forEach(cid => {
+        if (seen.has(cid)) return;
+        seen.add(cid);
+        rows.push({wxid: cid, display_name: this.groupNameMap[cid] || cid, pathStr: item.pathStr});
+      });
+    }
+    return rows;
+  },
+
+  _searchClassifiedGroups(q) {
+    return this._allClassifiedGroups().filter(g => {
+      const haystack = `${g.display_name || ''} ${g.wxid} ${g.pathStr}`.toLowerCase();
+      return haystack.includes(q);
+    });
+  },
+
+  _setTagSelection(pathStr, checked) {
+    this._groupsForPath(pathStr).forEach(g => {
+      if (checked) this.selectedChatIds.add(g.wxid);
+      else this.selectedChatIds.delete(g.wxid);
+    });
+  },
+
+  _syncSelectionWithTags() {
+    const available = new Set(this._allClassifiedGroups().map(g => g.wxid));
+    this.selectedChatIds.forEach(id => {
+      if (!available.has(id)) this.selectedChatIds.delete(id);
+    });
+  },
+
+  _updateTagCheckboxStates() {
+    document.querySelectorAll('#tag-tree input[data-tag-path]').forEach(cb => {
+      const groups = this._groupsForPath(cb.dataset.tagPath);
+      const total = groups.length;
+      const selected = groups.filter(g => this.selectedChatIds.has(g.wxid)).length;
+      cb.checked = total > 0 && selected === total;
+      cb.indeterminate = selected > 0 && selected < total;
+    });
+  },
+
+  collectSelectedChatIds() {
+    return [...this.selectedChatIds];
+  },
+
+  updateSelectedCount() {
+    const el = document.getElementById('selected-group-count');
+    if (el) el.textContent = `已选 ${this.collectSelectedChatIds().length} 个群`;
+  },
+
+  // -------------------------------------------------------------------
+  // Results
+  // -------------------------------------------------------------------
+  async loadResults() {
+    try {
+      const r = await fetch('/api/analysis/results');
+      const data = await r.json();
+      this.results = data.results || [];
+      this.renderResults();
+    } catch (e) { /* ignore */ }
+  },
+
+  renderResults() {
+    const container = document.getElementById('results-list');
+    if (this.results.length === 0) {
+      container.innerHTML = '<div class="empty-state">选择群聊和日期，点击"开始分析"查看结果</div>';
+      return;
+    }
+    container.innerHTML = '';
+    this.results.forEach(r => {
+      const groupName = this._groupName(r.chat_id);
+      const card = document.createElement('div');
+      card.className = 'result-card';
+      card.innerHTML = `
+        <div class="result-header">
+          <strong title="${this._esc(r.chat_id)}">${this._esc(groupName)}</strong>
+          <span class="hint">${r.date}</span>
+          <button class="btn-tiny btn-danger" data-del-chat="${this._esc(r.chat_id)}" data-del-date="${r.date}">删除</button>
+        </div>
+        <div class="result-body" data-md-empty="true">加载中...</div>`;
+      container.appendChild(card);
+      this._loadMd(r.chat_id, r.date, card.querySelector('.result-body'));
+    });
+    container.addEventListener('click', e => {
+      const btn = e.target.closest('button[data-del-chat]');
+      if (!btn) return;
+      if (!confirm(`删除 ${btn.dataset.delDate} 的分析结果？`)) return;
+      fetch(`/api/analysis/result/${encodeURIComponent(btn.dataset.delChat)}/${btn.dataset.delDate}`, {method: 'DELETE'})
+        .then(() => this.loadResults());
+    });
+  },
+
+  async _loadMd(chatId, date, target) {
+    try {
+      const r = await fetch(`/api/analysis/result/${encodeURIComponent(chatId)}/${date}`);
+      if (!r.ok) { target.textContent = '加载失败'; return; }
+      const data = await r.json();
+      target.innerHTML = marked.parse(this.sanitizeMarkdown(data.content || '', this._groupName(chatId)));
+    } catch (e) { target.textContent = '加载失败'; }
+  },
+
+  sanitizeMarkdown(content, groupName) {
+    let lines = String(content || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim().split('\n');
+    const start = lines.findIndex(line => {
+      const text = line.trim();
+      return text.startsWith('#') || text.includes('群聊分析报告') || text === '总体摘要' || text === '## 总体摘要';
+    });
+    if (start > 0) lines = lines.slice(start);
+    lines = lines.filter(line => {
+      const text = line.trim().toLowerCase();
+      return !/^(let me|i will|i'll|here is|here's|now i|based on|this group chat|i need to|let's|the main topics)\b/.test(text);
+    });
+    let result = lines.join('\n').trim();
+    if (result.startsWith('群聊分析报告')) result = '# ' + result;
+    if (groupName && result && !result.startsWith('#') && !result.slice(0, 80).includes('群聊分析报告')) {
+      result = `# 群聊分析报告：${groupName}\n\n${result}`;
+    }
+    return result;
+  },
+
+  // -------------------------------------------------------------------
+  // Schedules
+  // -------------------------------------------------------------------
+  async loadSchedules() {
+    try {
+      const r = await fetch('/api/analysis/schedules');
+      const data = await r.json();
+      this.schedules = data.schedules || [];
+      this.renderSchedules();
+    } catch (e) { /* ignore */ }
+  },
+
+  renderSchedules() {
+    const container = document.getElementById('schedule-list');
+    container.innerHTML = '';
+    this.schedules.forEach(s => {
+      const div = document.createElement('div');
+      div.className = 'schedule-item';
+      div.innerHTML = `
+        <div>${this._esc(s.name)}</div>
+        <div class="hint">${s.time} · ${(s.chat_ids||[]).length} 群 · ${s.enabled ? '✅ 启用' : '⏸ 暂停'}</div>
+        <div style="margin-top:4px">
+          <button class="btn-tiny" data-edit-sched="${s.id}">编辑</button>
+          <button class="btn-tiny btn-danger" data-del-sched="${s.id}">删除</button>
+        </div>`;
+      container.appendChild(div);
+    });
+    container.addEventListener('click', e => {
+      const editBtn = e.target.closest('button[data-edit-sched]');
+      const delBtn = e.target.closest('button[data-del-sched]');
+      if (editBtn) this.openScheduleModal(editBtn.dataset.editSched);
+      if (delBtn) {
+        if (confirm('删除该定时任务？'))
+          fetch(`/api/analysis/schedules/${delBtn.dataset.delSched}`, {method: 'DELETE'}).then(() => this.loadSchedules());
+      }
+    });
+  },
+
+  openScheduleModal(id) {
+    this.currentScheduleId = id || null;
+    const s = id ? this.schedules.find(x => x.id === id) : null;
+    document.getElementById('schedule-modal-title').textContent = s ? '编辑定时任务' : '新建定时任务';
+    document.getElementById('sched-name').value = s ? s.name : '';
+    document.getElementById('sched-time').value = s ? s.time : '08:00';
+    document.getElementById('sched-enabled').checked = s ? s.enabled : true;
+
+    const list = document.getElementById('sched-group-list');
+    list.innerHTML = '';
+    // Collect all groups from tags + untagged
+    const allGroups = [];
+    (this.untagged || []).forEach(g => allGroups.push(g));
+    const collectFromTag = (tag) => {
+      (tag.chat_ids || []).forEach(cid => allGroups.push({wxid: cid, display_name: this.groupNameMap[cid] || cid}));
+      (tag.children || []).forEach(collectFromTag);
+    };
+    (this.tags || []).forEach(collectFromTag);
+    allGroups.forEach(g => {
+      const checked = s && (s.chat_ids || []).includes(g.wxid);
+      const label = document.createElement('label');
+      label.className = 'checkbox-item';
+      label.innerHTML = `<input type="checkbox" value="${this._esc(g.wxid)}" ${checked ? 'checked' : ''}><span>${this._esc(g.display_name || g.wxid)}</span>`;
+      list.appendChild(label);
+    });
+    document.getElementById('schedule-modal').hidden = false;
+  },
+
+  async saveSchedule() {
+    const chatIds = [...document.querySelectorAll('#sched-group-list input:checked')].map(cb => cb.value);
+    if (chatIds.length === 0) { alert('请至少选择一个群'); return; }
+    const data = {
+      name: document.getElementById('sched-name').value.trim() || '未命名任务',
+      time: document.getElementById('sched-time').value.trim() || '08:00',
+      enabled: document.getElementById('sched-enabled').checked,
+      chat_ids: chatIds,
+    };
+    const url = this.currentScheduleId ? `/api/analysis/schedules/${this.currentScheduleId}` : '/api/analysis/schedules';
+    const method = this.currentScheduleId ? 'PUT' : 'POST';
+    await fetch(url, {method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)});
+    document.getElementById('schedule-modal').hidden = true;
+    this.loadSchedules();
+  },
+
+  // -------------------------------------------------------------------
+  // Run analysis
+  // -------------------------------------------------------------------
+  async runAnalysis() {
+    const chatIds = this.collectSelectedChatIds();
+    if (chatIds.length === 0) { alert('请至少选择一个群'); return; }
+    const dateFrom = document.getElementById('date-from').value;
+    const dateTo = document.getElementById('date-to').value;
+    if (!dateFrom || !dateTo) { alert('请选择日期范围'); return; }
+
+    document.getElementById('run-progress').hidden = false;
+    document.getElementById('run-btn').disabled = true;
+    const fill = document.getElementById('progress-fill');
+    const text = document.getElementById('progress-text');
+
+    try {
+      const r = await fetch('/api/analysis/run', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({chat_ids: chatIds, date_range: [dateFrom, dateTo]}),
+      });
+      if (!r.ok) {
+        text.textContent = '启动失败: ' + (await r.text());
+        document.getElementById('run-btn').disabled = false;
+        return;
+      }
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value);
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const ev = JSON.parse(line.slice(6));
+            if (ev.stage === 'progress') {
+              fill.style.width = (ev.progress * 100) + '%';
+              text.textContent = ev.detail || '';
+            } else if (ev.stage === 'done') {
+              text.textContent = '✅ 分析完成！';
+              this.loadResults();
+            } else if (ev.stage === 'error') {
+              text.textContent = '❌ 错误: ' + (ev.message || '');
+            }
+          } catch (e) { /* ignore parse errors */ }
+        }
+      }
+    } catch (e) {
+      text.textContent = '请求失败: ' + e.message;
+    }
+    document.getElementById('run-btn').disabled = false;
+  },
+
+  // -------------------------------------------------------------------
+  // Events
+  // -------------------------------------------------------------------
+  bindEvents() {
+    document.getElementById('open-settings').onclick = () => { document.getElementById('settings-modal').hidden = false; };
+    document.getElementById('close-settings').onclick = () => { document.getElementById('settings-modal').hidden = true; };
+    document.getElementById('save-config').onclick = () => this.saveConfig();
+    document.getElementById('test-connection').onclick = () => this.testConnection();
+    document.getElementById('run-btn').onclick = () => this.runAnalysis();
+    document.getElementById('add-schedule').onclick = () => this.openScheduleModal(null);
+    document.getElementById('close-schedule').onclick = () => { document.getElementById('schedule-modal').hidden = true; };
+    document.getElementById('save-schedule').onclick = () => this.saveSchedule();
+    document.getElementById('refresh-groups').onclick = () => this.loadTagTree();
+    const quickDates = document.getElementById('date-quick-actions');
+    if (quickDates) {
+      quickDates.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-days]');
+        if (btn) this.setQuickDateRange(btn.dataset.days);
+      });
+    }
+
+    document.getElementById('group-search').oninput = (e) => {
+      this.groupSearchQuery = e.target.value || '';
+      this.renderTagTree();
+    };
+
+    // Default dates: yesterday
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const ds = yesterday.toISOString().slice(0, 10);
+    document.getElementById('date-from').value = ds;
+    document.getElementById('date-to').value = ds;
+  },
+
+  _esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s || '';
+    return d.innerHTML;
+  },
+
+  _groupName(chatId) {
+    return this.groupNameMap[chatId] || chatId;
+  },
+};
+
+document.addEventListener('DOMContentLoaded', () => AnalysisApp.init());

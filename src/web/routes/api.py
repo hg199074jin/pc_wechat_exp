@@ -14,14 +14,174 @@ from engine.services.media import serve_media, serve_hardlink_media, serve_voice
 from engine.services.address_book import get_all_contacts, get_all_groups
 import csv
 import io
+import json
+import sqlite3
+import time
+from datetime import datetime as _dt
 
 api_bp = Blueprint('api', __name__)
+
+_GROUP_NAMES_CACHE_TTL = 7 * 24 * 3600
 
 
 def _cfg():
     return (current_app.config.get('DECRYPTED_DIR', ''),
             current_app.config.get('WXID'),
             current_app.config.get('DB_DIR'))
+
+
+def _group_names_cache_path(decrypted_dir: str) -> str:
+    return os.path.join(os.path.dirname(decrypted_dir), 'ai_analysis', 'group_names_cache.json')
+
+
+def _load_group_names_cache(decrypted_dir: str, max_age: int = _GROUP_NAMES_CACHE_TTL) -> list:
+    path = _group_names_cache_path(decrypted_dir)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if time.time() - float(data.get('ts', 0)) > max_age:
+            return None
+        groups = data.get('groups')
+        return groups if isinstance(groups, list) else None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _save_group_names_cache(decrypted_dir: str, groups: list) -> None:
+    path = _group_names_cache_path(decrypted_dir)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'ts': time.time(), 'groups': groups}, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def _resolve_group_names(decrypted_dir: str, progress_cb=None) -> list:
+    groups = get_all_groups(decrypted_dir)
+    total = len(groups)
+    if progress_cb:
+        progress_cb(0, total, '准备解析群名称')
+
+    needs_resolve = any(
+        (g.get('display_name') or '') == (g.get('wxid') or '')
+        for g in groups[:10]
+    )
+    if needs_resolve:
+        from engine.services.chat import _load_contacts, _load_sessions, _load_room_owners, _find_file, _resolve_display
+        contact_db = _find_file(decrypted_dir, "contact/contact.db", "contact.db")
+        session_db = _find_file(decrypted_dir, "session/session.db", "session.db")
+        id_to_name, name_to_id, _ = _load_contacts(contact_db)
+        session_summaries = _load_sessions(session_db)
+        room_owners = _load_room_owners(contact_db)
+        for idx, g in enumerate(groups, 1):
+            uname = g['wxid']
+            g['display_name'] = _resolve_display(
+                uname, is_group=True, decrypted_dir=decrypted_dir,
+                id_to_name=id_to_name, name_to_id=name_to_id,
+                session_summaries=session_summaries, room_owners=room_owners,
+            )
+            if progress_cb:
+                progress_cb(idx, total, f'已解码 {idx}/{total} 个群名称')
+    else:
+        for idx, _ in enumerate(groups, 1):
+            if progress_cb:
+                progress_cb(idx, total, f'已读取 {idx}/{total} 个群名称')
+
+    _save_group_names_cache(decrypted_dir, groups)
+    return groups
+
+
+def _recent_group_activity(decrypted_dir: str, chat_ids: list, days: int = 3) -> dict:
+    """Count messages per group in the recent N days.
+
+    This is intentionally opt-in because scanning 1000+ Msg_<hash> tables can
+    be noticeably slower than reading the chats index.
+    """
+    try:
+        from engine.services.message import _find_all_chat_dbs
+    except ImportError:
+        return {}
+
+    cutoff = int(time.time()) - max(1, int(days or 3)) * 86400
+    counts = {}
+    for chat_id in chat_ids or []:
+        total = 0
+        try:
+            for db_path, table_name in _find_all_chat_dbs(decrypted_dir, chat_id):
+                try:
+                    conn = sqlite3.connect(db_path)
+                    row = conn.execute(
+                        f"SELECT COUNT(*) FROM {table_name} WHERE create_time >= ?",
+                        (cutoff,),
+                    ).fetchone()
+                    conn.close()
+                    total += int(row[0] or 0) if row else 0
+                except sqlite3.Error:
+                    continue
+        except Exception:
+            total = 0
+        counts[chat_id] = total
+    return counts
+
+
+def _enrich_group_stats(decrypted_dir: str, groups: list, include_activity: bool = False) -> list:
+    """Attach message_count, last_msg_time, and optional recent activity."""
+    stats_by_id = {}
+    try:
+        for g in get_all_groups(decrypted_dir):
+            wxid = g.get('wxid')
+            if wxid:
+                stats_by_id[wxid] = g
+    except Exception:
+        stats_by_id = {}
+
+    for g in groups or []:
+        src = stats_by_id.get(g.get('wxid'), {})
+        g['msg_count'] = int(g.get('msg_count') or src.get('msg_count') or 0)
+        g['last_msg_time'] = g.get('last_msg_time') or src.get('last_msg_time')
+
+    if include_activity:
+        activity = _recent_group_activity(decrypted_dir, [g.get('wxid') for g in groups or []])
+        for g in groups or []:
+            g['active_3d'] = int(activity.get(g.get('wxid'), 0) or 0)
+
+    return groups or []
+
+
+def _parse_group_time(value) -> int:
+    if not value:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value / 1000) if value > 1000000000000 else int(value)
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        pass
+    try:
+        return int(_dt.fromisoformat(str(value).replace('Z', '+00:00')).timestamp())
+    except (ValueError, TypeError):
+        return 0
+
+
+def _recent_days_arg() -> int | None:
+    raw = request.args.get('recent_days')
+    if raw in (None, ''):
+        return None
+    try:
+        days = int(raw)
+    except (ValueError, TypeError):
+        return None
+    return max(0, days)
+
+
+def _filter_recent_groups(groups: list, days: int | None) -> list:
+    if days is None or days <= 0:
+        return groups or []
+    cutoff = int(time.time()) - days * 86400
+    return [g for g in groups or [] if _parse_group_time(g.get('last_msg_time')) >= cutoff]
 
 
 @api_bp.route('/contacts')
@@ -395,29 +555,129 @@ def address_book_groups():
     Slow path: groups from contact.db need _resolve_display lookup.
     """
     decrypted_dir, wxid, db_dir = _cfg()
-    groups = get_all_groups(decrypted_dir)
+    force = request.args.get('force') == '1'
+    include_activity = request.args.get('activity') == '1'
+    recent_days = _recent_days_arg()
+    groups = None if force else _load_group_names_cache(decrypted_dir)
+    source = 'cache'
+    if groups is None:
+        groups = _resolve_group_names(decrypted_dir)
+        source = 'resolved'
+    groups = _enrich_group_stats(decrypted_dir, groups, include_activity=include_activity)
+    if source == 'cache' or include_activity:
+        _save_group_names_cache(decrypted_dir, groups)
+    groups = _filter_recent_groups(groups, recent_days)
 
-    # Check if groups already have meaningful display names (fast path)
-    needs_resolve = any(
-        (g.get('display_name') or '') == (g.get('wxid') or '')
-        for g in groups[:10]
-    )
-    if needs_resolve:
-        from engine.services.chat import _load_contacts, _load_sessions, _load_room_owners, _find_file, _resolve_display
-        contact_db = _find_file(decrypted_dir, "contact/contact.db", "contact.db")
-        session_db = _find_file(decrypted_dir, "session/session.db", "session.db")
-        id_to_name, name_to_id, _ = _load_contacts(contact_db)
-        session_summaries = _load_sessions(session_db)
-        room_owners = _load_room_owners(contact_db)
-        for g in groups:
-            uname = g['wxid']
-            g['display_name'] = _resolve_display(
-                uname, is_group=True, decrypted_dir=decrypted_dir,
-                id_to_name=id_to_name, name_to_id=name_to_id,
-                session_summaries=session_summaries, room_owners=room_owners,
+    return jsonify({
+        'groups': groups,
+        'total': len(groups),
+        'source': source,
+        'activity': include_activity,
+        'recent_days': recent_days,
+    })
+
+
+@api_bp.route('/address-book/groups/stream')
+def address_book_groups_stream():
+    """Stream group-name loading progress as SSE, then return full groups."""
+    from flask import Response, stream_with_context
+
+    decrypted_dir, _, _ = _cfg()
+    force = request.args.get('force') == '1'
+    include_activity = request.args.get('activity') == '1'
+    recent_days = _recent_days_arg()
+
+    def _event(payload: dict) -> str:
+        return 'data: ' + json.dumps(payload, ensure_ascii=False) + '\n\n'
+
+    @stream_with_context
+    def _gen():
+        cached = None if force else _load_group_names_cache(decrypted_dir)
+        if cached is not None:
+            cached = _enrich_group_stats(decrypted_dir, cached, include_activity=include_activity)
+            if include_activity:
+                _save_group_names_cache(decrypted_dir, cached)
+            visible = _filter_recent_groups(cached, recent_days)
+            total = len(visible)
+            yield _event({
+                'stage': 'progress',
+                'done': total,
+                'total': total,
+                'progress': 1,
+                'detail': f'已从缓存读取 {total}/{total} 个群名称',
+                'source': 'cache',
+            })
+            yield _event({'stage': 'done', 'groups': visible, 'total': total, 'source': 'cache', 'recent_days': recent_days})
+            return
+
+        try:
+            groups = get_all_groups(decrypted_dir)
+            total = len(groups)
+            yield _event({
+                'stage': 'progress',
+                'done': 0,
+                'total': total,
+                'progress': 0,
+                'detail': f'准备解析 0/{total} 个群名称',
+                'source': 'resolved',
+            })
+
+            needs_resolve = any(
+                (g.get('display_name') or '') == (g.get('wxid') or '')
+                for g in groups[:10]
             )
+            if needs_resolve:
+                from engine.services.chat import _load_contacts, _load_sessions, _load_room_owners, _find_file, _resolve_display
+                contact_db = _find_file(decrypted_dir, "contact/contact.db", "contact.db")
+                session_db = _find_file(decrypted_dir, "session/session.db", "session.db")
+                id_to_name, name_to_id, _ = _load_contacts(contact_db)
+                session_summaries = _load_sessions(session_db)
+                room_owners = _load_room_owners(contact_db)
+                for idx, g in enumerate(groups, 1):
+                    uname = g['wxid']
+                    g['display_name'] = _resolve_display(
+                        uname, is_group=True, decrypted_dir=decrypted_dir,
+                        id_to_name=id_to_name, name_to_id=name_to_id,
+                        session_summaries=session_summaries, room_owners=room_owners,
+                    )
+                    yield _event({
+                        'stage': 'progress',
+                        'done': idx,
+                        'total': total,
+                        'progress': idx / max(total, 1),
+                        'detail': f'已解码 {idx}/{total} 个群名称',
+                        'source': 'resolved',
+                    })
+            else:
+                for idx, _ in enumerate(groups, 1):
+                    yield _event({
+                        'stage': 'progress',
+                        'done': idx,
+                        'total': total,
+                        'progress': idx / max(total, 1),
+                        'detail': f'已读取 {idx}/{total} 个群名称',
+                        'source': 'resolved',
+                    })
 
-    return jsonify({'groups': groups, 'total': len(groups)})
+            _save_group_names_cache(decrypted_dir, groups)
+            groups = _enrich_group_stats(decrypted_dir, groups, include_activity=include_activity)
+            if include_activity:
+                _save_group_names_cache(decrypted_dir, groups)
+            visible = _filter_recent_groups(groups, recent_days)
+            visible_total = len(visible)
+            yield _event({
+                'stage': 'progress',
+                'done': visible_total,
+                'total': visible_total,
+                'progress': 1,
+                'detail': f'群名称加载完成 {visible_total}/{visible_total}',
+                'source': 'resolved',
+            })
+            yield _event({'stage': 'done', 'groups': visible, 'total': visible_total, 'source': 'resolved', 'recent_days': recent_days})
+        except Exception as e:
+            yield _event({'stage': 'error', 'message': str(e)})
+
+    return Response(_gen(), mimetype='text/event-stream')
 
 
 @api_bp.route('/address-book/export')

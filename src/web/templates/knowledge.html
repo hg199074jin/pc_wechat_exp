@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+{% block title %}知识沉淀雷达 — WeChat EXP{% endblock %}
+{% block head %}
+<style>
+.knowledge-layout { display: grid; grid-template-columns: 280px 1fr; gap: 16px; min-height: calc(100vh - 120px); }
+.knowledge-sidebar { border: 1px solid #30363d; background: #161b22; border-radius: 6px; padding: 12px; overflow-y: auto; max-height: calc(100vh - 140px); position: sticky; top: 10px; }
+.knowledge-sidebar h3 { margin: 0 0 12px; font-size: 16px; }
+.knowledge-main { min-width: 0; }
+.knowledge-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+.knowledge-toolbar .text-input { font-size: 13px; }
+.filter-group { margin-bottom: 12px; }
+.filter-group label { display: block; font-size: 12px; color: #8b949e; margin-bottom: 4px; }
+.filter-group select, .filter-group input { width: 100%; }
+.nav-list { list-style: none; padding: 0; margin: 0 0 12px; }
+.nav-list li { padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; color: #c9d1d9; }
+.nav-list li:hover { background: #21262d; }
+.nav-list li.active { background: #1f6feb; color: #fff; }
+.nav-count { float: right; font-size: 11px; color: #8b949e; }
+.knowledge-card { border: 1px solid #30363d; background: #161b22; border-radius: 6px; padding: 14px; margin-bottom: 10px; transition: border-color 0.15s; }
+.knowledge-card:hover { border-color: #58a6ff; }
+.knowledge-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.knowledge-card-header h3 { margin: 0; font-size: 15px; cursor: pointer; color: #58a6ff; }
+.knowledge-card-header h3:hover { text-decoration: underline; }
+.knowledge-score { font-weight: 700; font-size: 18px; min-width: 40px; text-align: right; }
+.score-high { color: #56d364; }
+.score-mid { color: #d29922; }
+.score-low { color: #f85149; }
+.knowledge-meta { color: #8b949e; font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+.knowledge-meta span { display: inline-flex; align-items: center; gap: 3px; }
+.knowledge-summary { margin: 8px 0 0; font-size: 13px; line-height: 1.5; }
+.knowledge-why { margin: 6px 0 0; font-size: 12px; color: #8b949e; font-style: italic; }
+.knowledge-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.knowledge-tag { font-size: 11px; color: #58a6ff; border: 1px solid #30363d; border-radius: 999px; padding: 1px 8px; cursor: pointer; }
+.knowledge-tag:hover { background: #21262d; }
+.knowledge-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.btn-tiny { font-size: 12px; padding: 3px 10px; border-radius: 4px; border: 1px solid #30363d; background: #21262d; color: #c9d1d9; cursor: pointer; }
+.btn-tiny:hover { background: #30363d; }
+.btn-tiny.btn-primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+.btn-tiny.btn-primary:hover { background: #388bfd; }
+.btn-tiny.btn-danger { color: #f85149; border-color: #f85149; }
+.btn-tiny.btn-danger:hover { background: #f8514922; }
+.knowledge-detail { border: 1px solid #30363d; background: #0d1117; border-radius: 6px; padding: 16px; margin-top: 12px; }
+.knowledge-detail h4 { margin: 0 0 8px; font-size: 14px; }
+.source-item { border-left: 3px solid #30363d; padding: 6px 10px; margin: 6px 0; font-size: 12px; background: #161b22; border-radius: 0 4px 4px 0; }
+.source-meta { color: #8b949e; margin-bottom: 3px; }
+.source-quote { color: #c9d1d9; }
+.empty-state { text-align: center; color: #8b949e; padding: 60px 20px; }
+.progress-bar-container { height: 4px; background: #21262d; border-radius: 2px; margin: 8px 0; overflow: hidden; }
+.progress-bar-fill { height: 100%; background: #1f6feb; border-radius: 2px; transition: width 0.3s; width: 0; }
+.scan-controls { border: 1px solid #30363d; background: #161b22; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+.scan-controls .form-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.scan-controls .form-row:last-child { margin-bottom: 0; }
+.scan-controls label { font-size: 12px; color: #8b949e; min-width: 60px; }
+.tag-picker { border: 1px solid #30363d; background: #0d1117; border-radius: 4px; padding: 8px; max-height: 180px; overflow-y: auto; font-size: 12px; }
+.tag-picker label { display: flex; align-items: center; gap: 6px; padding: 3px 0; cursor: pointer; color: #c9d1d9; min-width: auto; }
+.tag-children { margin-left: 18px; }
+.schedule-item { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #21262d; font-size: 13px; }
+.schedule-item:last-child { border-bottom: none; }
+.convert-dropdown { position: relative; display: inline-block; }
+.convert-menu { display: none; position: absolute; left: 0; top: 100%; background: #21262d; border: 1px solid #30363d; border-radius: 4px; z-index: 10; min-width: 130px; }
+.convert-menu.show { display: block; }
+.convert-menu a { display: block; padding: 6px 12px; color: #c9d1d9; font-size: 12px; text-decoration: none; }
+.convert-menu a:hover { background: #30363d; }
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; justify-content: center; align-items: center; }
+.modal-overlay.show { display: flex; }
+.modal-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; width: 500px; max-width: 90vw; max-height: 80vh; overflow-y: auto; }
+.modal-box h3 { margin: 0 0 12px; }
+.modal-box .form-row { margin-bottom: 10px; }
+.modal-box .form-row label { display: block; font-size: 12px; color: #8b949e; margin-bottom: 3px; }
+.modal-box .form-row input, .modal-box .form-row select { width: 100%; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+</style>
+{% endblock %}
+{% block content %}
+<div class="knowledge-layout">
+  <aside class="knowledge-sidebar">
+    <h3>📡 知识沉淀</h3>
+    <ul class="nav-list" id="status-nav">
+      <li class="active" data-status="">全部 <span class="nav-count" id="count-all">0</span></li>
+      <li data-status="inbox">待沉淀 <span class="nav-count" id="count-inbox">0</span></li>
+      <li data-status="saved">已收藏 <span class="nav-count" id="count-saved">0</span></li>
+      <li data-status="archived">已归档 <span class="nav-count" id="count-archived">0</span></li>
+      <li data-status="rejected">已忽略 <span class="nav-count" id="count-rejected">0</span></li>
+    </ul>
+    <div class="filter-group">
+      <label>类型</label>
+      <select id="filter-type" class="text-input">
+        <option value="">全部类型</option>
+        <option value="audit_case">审计案例</option>
+        <option value="sop">SOP</option>
+        <option value="prompt">提示词</option>
+        <option value="faq">FAQ</option>
+        <option value="article">文章素材</option>
+        <option value="tool">工具经验</option>
+        <option value="risk">风险线索</option>
+        <option value="methodology">方法论</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>最低分</label>
+      <input id="filter-min-score" class="text-input" type="number" min="0" max="100" value="70">
+    </div>
+    <hr style="border-color:#30363d;margin:12px 0">
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn-tiny btn-primary" id="btn-scan">扫描知识</button>
+      <button class="btn-tiny" id="btn-export-md">导出 MD</button>
+      <button class="btn-tiny" id="btn-export-docx">导出 Word</button>
+    </div>
+    <hr style="border-color:#30363d;margin:12px 0">
+    <h4 style="margin:0 0 8px;font-size:13px;">定时任务</h4>
+    <div id="schedule-list"></div>
+    <button class="btn-tiny" id="btn-add-schedule" style="margin-top:6px">+ 新建定时扫描</button>
+  </aside>
+  <main class="knowledge-main">
+    <div class="knowledge-toolbar">
+      <input id="knowledge-search" class="text-input" placeholder="搜索标题、摘要、标签..." style="flex:1;max-width:400px">
+      <button class="btn-tiny" id="btn-refresh">刷新</button>
+      <button class="btn-tiny" id="btn-bulk-select">全选</button>
+      <button class="btn-tiny" id="btn-bulk-archive">批量归档</button>
+      <button class="btn-tiny btn-danger" id="btn-bulk-delete">批量删除</button>
+    </div>
+    <div id="scan-progress" style="display:none">
+      <div style="font-size:13px;color:#8b949e" id="scan-status"></div>
+      <div class="progress-bar-container"><div class="progress-bar-fill" id="scan-bar"></div></div>
+    </div>
+    <div id="knowledge-list"></div>
+  </main>
+</div>
+
+<!-- Scan Modal -->
+<div class="modal-overlay" id="scan-modal">
+  <div class="modal-box">
+    <h3>📡 知识雷达扫描</h3>
+    <div class="form-row">
+      <label>日期范围</label>
+      <div style="display:flex;gap:8px">
+        <input type="date" id="scan-date-from" class="text-input" style="flex:1">
+        <input type="date" id="scan-date-to" class="text-input" style="flex:1">
+      </div>
+    </div>
+    <div class="form-row">
+      <label>领域模板</label>
+      <select id="scan-domain" class="text-input">
+        <option value="general">综合</option>
+        <option value="audit_ai">审计/财税 + AI</option>
+        <option value="audit">审计/财税</option>
+        <option value="ai">AI 工具</option>
+        <option value="private_domain">私域/课程</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>群聊选择</label>
+      <div class="tag-picker" id="scan-tag-picker"></div>
+    </div>
+    <div class="form-row">
+      <label>最低分</label>
+      <input type="number" id="scan-min-score" class="text-input" value="70" min="0" max="100">
+    </div>
+    <div class="form-row">
+      <label>最大卡片数</label>
+      <input type="number" id="scan-max-cards" class="text-input" value="30" min="1" max="200">
+    </div>
+    <div class="modal-actions">
+      <button class="btn-tiny" onclick="KnowledgeApp.closeScanModal()">取消</button>
+      <button class="btn-tiny btn-primary" id="btn-start-scan">开始扫描</button>
+    </div>
+  </div>
+</div>
+
+<!-- Schedule Modal -->
+<div class="modal-overlay" id="schedule-modal">
+  <div class="modal-box">
+    <h3>⏰ 定时扫描配置</h3>
+    <div class="form-row">
+      <label>任务名称</label>
+      <input type="text" id="sched-name" class="text-input" placeholder="每日知识雷达">
+    </div>
+    <div class="form-row">
+      <label>执行时间</label>
+      <input type="time" id="sched-time" class="text-input" value="08:00">
+    </div>
+    <div class="form-row">
+      <label>领域</label>
+      <select id="sched-domain" class="text-input">
+        <option value="general">综合</option>
+        <option value="audit_ai">审计/财税 + AI</option>
+        <option value="audit">审计/财税</option>
+        <option value="ai">AI 工具</option>
+        <option value="private_domain">私域/课程</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>群聊选择</label>
+      <div class="tag-picker" id="sched-tag-picker"></div>
+    </div>
+    <div class="form-row">
+      <label>最低分</label>
+      <input type="number" id="sched-min-score" class="text-input" value="70" min="0" max="100">
+    </div>
+    <div class="modal-actions">
+      <button class="btn-tiny" onclick="KnowledgeApp.closeScheduleModal()">取消</button>
+      <button class="btn-tiny btn-primary" id="btn-save-schedule">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Detail Modal -->
+<div class="modal-overlay" id="detail-modal">
+  <div class="modal-box" style="width:700px">
+    <div id="detail-content"></div>
+    <div class="modal-actions">
+      <button class="btn-tiny" onclick="KnowledgeApp.closeDetailModal()">关闭</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/knowledge-app.js') }}"></script>
+{% endblock %}

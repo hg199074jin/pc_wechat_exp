@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}AI 群聊分析 — WeChat EXP{% endblock %}
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+.page-layout { display: grid; grid-template-columns: 320px 1fr; gap: 20px; min-height: calc(100vh - 120px); }
+.sidebar { display: flex; flex-direction: column; gap: 16px; }
+.main-area { min-width: 0; }
+.text-input { width: 100%; padding: 6px 10px; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; box-sizing: border-box; }
+.checkbox-list { max-height: 240px; overflow-y: auto; border: 1px solid #30363d; border-radius: 4px; padding: 4px; }
+.checkbox-item { display: flex; align-items: center; gap: 8px; padding: 4px; cursor: pointer; }
+.checkbox-item:hover { background: #161b22; }
+.group-picker { margin-top: 8px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; overflow: hidden; }
+.group-picker-v2 { max-height: none; padding: 0; }
+.group-picker-shell { display: grid; grid-template-columns: minmax(112px, 42%) minmax(0, 58%); min-height: 280px; max-height: 380px; }
+.group-picker-tags, .group-picker-groups { min-width: 0; overflow-y: auto; }
+.group-picker-tags { border-right: 1px solid #30363d; background: #0b1118; padding: 6px; }
+.group-picker-groups { padding: 8px; }
+.picker-pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; color: #8b949e; font-size: 12px; }
+.picker-pane-actions { display: flex; gap: 6px; }
+.picker-action { background: #161b22; color: #58a6ff; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; font-size: 12px; padding: 3px 7px; }
+.picker-action:hover { border-color: #58a6ff; }
+.group-picker-row { display: flex; align-items: center; min-height: 30px; gap: 8px; padding: 3px 6px; border-radius: 4px; box-sizing: border-box; }
+.group-picker-row input { flex: 0 0 auto; }
+.group-picker-row .label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.group-picker-row .count-badge { flex: 0 0 auto; font-size: 11px; color: #8b949e; background: #21262d; border: 1px solid #30363d; border-radius: 999px; padding: 1px 7px; }
+.group-picker-row.tag { color: #c9d1d9; cursor: pointer; }
+.group-picker-row.tag:hover, .group-picker-row.tag.active { background: #161b22; }
+.group-picker-row.tag.active { outline: 1px solid #30363d; }
+.group-picker-row.group { color: #c9d1d9; font-size: 12px; cursor: pointer; }
+.group-picker-row.group:hover { background: #161b22; }
+.group-picker-empty { color: #8b949e; font-size: 12px; line-height: 1.6; padding: 24px 10px; text-align: center; }
+.group-picker-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.group-picker-actions { display: flex; gap: 6px; }
+.link-btn { background: transparent; border: 0; color: #58a6ff; cursor: pointer; font-size: 12px; padding: 2px 4px; text-decoration: none; }
+.link-btn:hover { text-decoration: underline; }
+@media (max-width: 900px) {
+  .group-picker-shell { grid-template-columns: 1fr; max-height: 520px; }
+  .group-picker-tags { border-right: 0; border-bottom: 1px solid #30363d; max-height: 180px; }
+}
+.btn-primary, .btn-secondary { padding: 8px 16px; border-radius: 4px; cursor: pointer; border: none; font-size: 14px; }
+.btn-primary { background: #58a6ff; color: #0d1117; }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+.btn-tiny { padding: 2px 8px; font-size: 12px; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 3px; cursor: pointer; }
+.btn-danger { color: #f85149; border-color: #f85149; }
+.progress-area { margin-top: 10px; }
+.progress-bar { height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; }
+.progress-fill { height: 100%; background: #58a6ff; width: 0; transition: width 0.3s; }
+.date-quick-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.date-quick-actions .btn-tiny { flex: 1 1 72px; }
+.result-card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+.result-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.result-header strong { color: #58a6ff; }
+.result-body { color: #c9d1d9; line-height: 1.6; }
+.result-body h2 { margin-top: 16px; color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 4px; }
+.result-body blockquote { border-left: 3px solid #30363d; padding-left: 12px; color: #8b949e; margin: 8px 0; }
+.result-body ul, .result-body ol { padding-left: 20px; }
+.schedule-item { padding: 8px; border-bottom: 1px solid #30363d; }
+.schedule-item .hint { font-size: 12px; color: #8b949e; }
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal[hidden] { display: none; }
+.modal-content { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 24px; width: 480px; max-width: 90vw; }
+.modal-content label { display: block; margin-bottom: 12px; color: #c9d1d9; }
+.modal-content label input { margin-top: 4px; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.checkbox-label { display: flex; align-items: center; gap: 8px; }
+.hint { color: #8b949e; font-size: 12px; margin: 4px 0; }
+.empty-state { color: #8b949e; text-align: center; padding: 40px; }
+</style>
+{% endblock %}
+{% block content %}
+<div class="page-layout">
+  <aside class="sidebar">
+    <div class="config-panel">
+      <h3 style="margin:0 0 8px">⚙ LLM 设置</h3>
+      <button class="btn-secondary" id="open-settings" style="width:100%">配置 LLM 连接</button>
+      <p class="hint" id="llm-status">未配置</p>
+    </div>
+
+    <div class="config-panel">
+      <h3 style="margin:0 0 8px">📋 选择群聊</h3>
+      <input type="text" id="group-search" placeholder="搜索群名称..." class="text-input">
+      <div class="group-picker-toolbar">
+        <span class="hint" id="selected-group-count">已选 0 个群</span>
+        <span class="group-picker-actions">
+          <button class="link-btn" id="refresh-groups" type="button">刷新</button>
+          <a class="link-btn" href="/groups">群管理</a>
+        </span>
+      </div>
+      <div id="tag-tree" class="group-picker"></div>
+    </div>
+
+    <div class="config-panel">
+      <h3 style="margin:0 0 8px">📅 日期范围</h3>
+      <input type="date" id="date-from" class="text-input">
+      <span class="hint" style="text-align:center;display:block">至</span>
+      <input type="date" id="date-to" class="text-input">
+      <div class="date-quick-actions" id="date-quick-actions">
+        <button class="btn-tiny" type="button" data-days="1">最近1天</button>
+        <button class="btn-tiny" type="button" data-days="3">最近3天</button>
+        <button class="btn-tiny" type="button" data-days="7">最近7天</button>
+      </div>
+    </div>
+
+    <button class="btn-primary" id="run-btn" style="width:100%">▶ 开始分析</button>
+    <div id="run-progress" class="progress-area" hidden>
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+      <p class="hint" id="progress-text"></p>
+    </div>
+
+    <div class="config-panel">
+      <h3 style="margin:0 0 8px">⏰ 定时任务</h3>
+      <button class="btn-secondary" id="add-schedule" style="width:100%">+ 新建定时任务</button>
+      <div id="schedule-list" style="margin-top:8px"></div>
+    </div>
+  </aside>
+
+  <main class="main-area">
+    <h2 style="margin-top:0">📊 分析结果</h2>
+    <div id="results-list"><div class="empty-state">选择群聊和日期，点击"开始分析"查看结果</div></div>
+  </main>
+</div>
+
+<!-- LLM settings modal -->
+<div class="modal" id="settings-modal" hidden>
+  <div class="modal-content">
+    <h3 style="margin-top:0">LLM 配置</h3>
+    <label>Base URL <input type="text" id="cfg-base-url" class="text-input" placeholder="https://api.openai.com/v1"></label>
+    <label>API Key <input type="password" id="cfg-api-key" class="text-input" placeholder="sk-..."></label>
+    <label>Model <input type="text" id="cfg-model" class="text-input" placeholder="gpt-4o"></label>
+    <label>Temperature <input type="number" id="cfg-temperature" class="text-input" step="0.1" min="0" max="2" value="0.3"></label>
+    <label>Max Tokens <input type="number" id="cfg-max-tokens" class="text-input" min="64" max="32000" value="4096"></label>
+    <div class="modal-actions">
+      <button class="btn-secondary" id="test-connection">测试连接</button>
+      <button class="btn-primary" id="save-config">保存</button>
+      <button class="btn-secondary" id="close-settings">取消</button>
+    </div>
+    <p class="hint" id="test-result"></p>
+  </div>
+</div>
+
+<!-- Schedule modal -->
+<div class="modal" id="schedule-modal" hidden>
+  <div class="modal-content">
+    <h3 style="margin-top:0" id="schedule-modal-title">新建定时任务</h3>
+    <label>名称 <input type="text" id="sched-name" class="text-input" placeholder="每天早8点分析"></label>
+    <label>时间 (HH:MM) <input type="text" id="sched-time" class="text-input" placeholder="08:00"></label>
+    <label class="checkbox-label"><input type="checkbox" id="sched-enabled" checked> 启用</label>
+    <label>选择群聊</label>
+    <div id="sched-group-list" class="checkbox-list" style="max-height:200px"></div>
+    <div class="modal-actions">
+      <button class="btn-primary" id="save-schedule">保存</button>
+      <button class="btn-secondary" id="close-schedule">取消</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/analysis-app.js') }}"></script>
+{% endblock %}

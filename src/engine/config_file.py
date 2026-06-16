@@ -16,6 +16,52 @@ def _config_path() -> str:
     return os.path.join(base, CONFIG_FILENAME)
 
 
+def _read_config() -> dict:
+    path = _config_path()
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (ValueError, OSError):
+        return {}
+
+
+def _write_config(cfg: dict) -> None:
+    path = _config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def get_default_backup_root() -> str | None:
+    """Return the user's preferred backup output root, if configured."""
+    raw = _read_config().get("default_backup_root", "")
+    return str(raw) if raw else None
+
+
+def set_default_backup_root(path: str) -> None:
+    """Persist the preferred backup output root in the ignored local config."""
+    cfg = _read_config()
+    cfg["default_backup_root"] = str(path)
+    _write_config(cfg)
+
+
+def get_llm_config() -> dict:
+    """Return private LLM config from the ignored local config."""
+    llm = _read_config().get("llm", {})
+    return llm if isinstance(llm, dict) else {}
+
+
+def set_llm_config(llm_cfg: dict) -> None:
+    """Persist private LLM config in the ignored local config."""
+    cfg = _read_config()
+    cfg["llm"] = llm_cfg or {}
+    _write_config(cfg)
+
+
 def get_backup_data_dir() -> str | None:
     """Return the output directory from the last successful backup, or None."""
     path = _config_path()

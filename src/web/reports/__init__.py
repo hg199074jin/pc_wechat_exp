@@ -1,6 +1,4 @@
-"""Reports blueprint — word cloud, annual summary, HTML report."""
+"""Reports blueprint (currently unused after removing wordcloud)."""
 from flask import Blueprint
 
 reports_bp = Blueprint('reports', __name__, url_prefix='/reports')
-
-from . import wordcloud  # register routes

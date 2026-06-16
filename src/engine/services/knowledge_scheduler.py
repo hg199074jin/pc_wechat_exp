@@ -1,0 +1,163 @@
+"""Knowledge Radar — APScheduler integration for daily knowledge scans."""
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timedelta
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+
+_scheduler: BackgroundScheduler | None = None
+_current_config_path: str = ''
+_current_decrypted_dir: str = ''
+
+
+def start_scheduler(config_path: str, decrypted_dir: str) -> None:
+    """Start or restart the knowledge scan scheduler from config."""
+    global _scheduler, _current_config_path, _current_decrypted_dir
+    _current_config_path = config_path
+    _current_decrypted_dir = decrypted_dir
+
+    stop_scheduler()
+
+    schedules = _load_schedules(config_path)
+    if not schedules:
+        return
+
+    _scheduler = BackgroundScheduler(daemon=True)
+    for sched in schedules:
+        if not sched.get('enabled', True):
+            continue
+        _register_job(_scheduler, sched, config_path, decrypted_dir)
+
+    _scheduler.start()
+
+
+def stop_scheduler() -> None:
+    global _scheduler
+    if _scheduler:
+        try:
+            _scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+        _scheduler = None
+
+
+def reload_schedules() -> None:
+    if _current_config_path:
+        start_scheduler(_current_config_path, _current_decrypted_dir)
+
+
+def _load_schedules(config_path: str) -> list:
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        return cfg.get('knowledge_schedules', [])
+    except Exception:
+        return []
+
+
+def _register_job(sched: BackgroundScheduler, job: dict, config_path: str, decrypted_dir: str) -> None:
+    time_str = job.get('time') or '08:00'
+    parts = time_str.split(':')
+    hour = int(parts[0]) if len(parts) >= 1 else 8
+    minute = int(parts[1]) if len(parts) >= 2 else 0
+
+    now = datetime.now()
+    first_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if first_run <= now:
+        first_run += timedelta(days=1)
+
+    sched.add_job(
+        _run_for_job,
+        trigger=IntervalTrigger(days=1, start_date=first_run, misfire_grace_time=3600),
+        args=[job, config_path, decrypted_dir],
+        id=f"knowledge_scan_{job.get('id', 'unknown')}",
+        name=f"知识雷达: {job.get('name', '未命名')}",
+        replace_existing=True,
+    )
+
+
+def _run_for_job(job: dict, config_path: str, decrypted_dir: str) -> None:
+    """Execute a scheduled knowledge scan."""
+    from engine.services import knowledge_extractor as extractor
+    from engine.services import knowledge_store as store
+    from engine.services.ai_analyzer import load_tags
+    from engine.services.name_resolver import resolve_wxid
+
+    try:
+        llm_call = extractor.make_llm_call(config_path)
+    except RuntimeError as e:
+        print(f"[知识雷达] LLM 配置错误: {e}")
+        return
+
+    # Determine chat_ids
+    chat_ids = list(job.get('chat_ids') or [])
+    tag_paths = job.get('tag_paths') or []
+    if tag_paths:
+        try:
+            tags = load_tags(config_path)
+            _resolve_tag_paths(tags, tag_paths, chat_ids)
+        except Exception:
+            pass
+
+    if not chat_ids:
+        print("[知识雷达] 没有配置扫描群聊，跳过")
+        return
+
+    # Yesterday
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    min_score = int(job.get('min_score') or 70)
+    max_cards = int(job.get('max_cards') or 30)
+    domain = job.get('domain') or 'general'
+
+    dbp = store.knowledge_db_path(decrypted_dir)
+    run_id = store.create_run(dbp, yesterday, yesterday, chat_ids)
+
+    total_msgs = 0
+    total_cards = 0
+
+    try:
+        for cid in chat_ids:
+            try:
+                name = resolve_wxid(decrypted_dir, cid)
+                chat_name = name or cid
+            except Exception:
+                chat_name = cid
+
+            messages = extractor.load_messages_for_scan(decrypted_dir, cid, yesterday)
+            total_msgs += len(messages)
+            if not messages:
+                continue
+
+            cards = extractor.extract_cards_from_messages(
+                messages, chat_name, yesterday, llm_call,
+                min_score=min_score, domain=domain,
+            )
+            for card in cards[:max_cards]:
+                for src in card.get('sources', []):
+                    src['chat_id'] = cid
+                card['source_chat_ids'] = [cid]
+                store.save_card(dbp, card)
+                total_cards += 1
+
+        store.finish_run(dbp, run_id, status='done',
+                         total_messages=total_msgs, card_count=total_cards)
+        print(f"[知识雷达] 完成: {total_cards} 条知识卡片 (来自 {total_msgs} 条消息)")
+    except Exception as e:
+        store.finish_run(dbp, run_id, status='error', error=str(e))
+        print(f"[知识雷达] 扫描失败: {e}")
+
+
+def _resolve_tag_paths(tags: list, tag_paths: list, chat_ids: list) -> None:
+    """Recursively resolve tag_paths to chat_ids."""
+    def _walk(nodes, prefix=''):
+        for node in nodes:
+            path = f"{prefix}/{node['name']}" if prefix else node['name']
+            if path in tag_paths:
+                for cid in (node.get('chat_ids') or []):
+                    if cid not in chat_ids:
+                        chat_ids.append(cid)
+            _walk(node.get('children') or [], path)
+    _walk(tags)

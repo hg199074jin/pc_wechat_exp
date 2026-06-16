@@ -46,13 +46,6 @@ def create_app(decrypted_dir: str, wxid: str = None, db_dir: str = None) -> Flas
     except ImportError as e:
         print(f"[WARN] 无法加载报告蓝图 (reports): {e}")
 
-    # Wrapped annual report
-    try:
-        from .reports.wrapped import wrapped_bp
-        app.register_blueprint(wrapped_bp)
-    except ImportError as e:
-        print(f"[WARN] 无法加载年度报告蓝图 (reports.wrapped): {e}")
-
     # New: Backup API (SSE endpoints)
     try:
         from .routes.backup_api import backup_bp
@@ -80,6 +73,20 @@ def create_app(decrypted_dir: str, wxid: str = None, db_dir: str = None) -> Flas
         app.register_blueprint(cleanup_bp, url_prefix='/api')
     except ImportError as e:
         print(f"[WARN] 无法加载清理蓝图 (routes.cleanup_api): {e}")
+
+    # AI Analysis API
+    try:
+        from .routes.analysis_api import analysis_bp
+        app.register_blueprint(analysis_bp)
+    except ImportError as e:
+        print(f"[WARN] 无法加载分析蓝图 (routes.analysis_api): {e}")
+
+    # Knowledge Radar API
+    try:
+        from .routes.knowledge_api import knowledge_bp
+        app.register_blueprint(knowledge_bp)
+    except ImportError as e:
+        print(f"[WARN] 无法加载知识沉淀蓝图 (routes.knowledge_api): {e}")
 
     # JSON error handlers — prevent Flask HTML pages for API routes
     @app.errorhandler(404)
@@ -118,10 +125,6 @@ def create_app(decrypted_dir: str, wxid: str = None, db_dir: str = None) -> Flas
     def export_page():
         return render_template('export.html')
 
-    @app.route('/wordcloud')
-    def wordcloud_page():
-        return render_template('wordcloud.html')
-
     @app.route('/report')
     def report_page():
         return render_template('report.html')
@@ -138,16 +141,24 @@ def create_app(decrypted_dir: str, wxid: str = None, db_dir: str = None) -> Flas
     def cleanup_page():
         return render_template('cleanup.html')
 
-    @app.route('/wrapped')
-    def wrapped_page():
-        return render_template('wrapped.html')
-
     @app.route('/manual')
     def manual_page():
         try:
             return render_template('manual.html')
         except Exception:
             return "<html><body style='background:#0d1117;color:#c9d1d9;padding:40px;font-family:sans-serif;'><p>手册尚未生成。请运行 <code>python scripts/build_readme_html.py</code> 生成手册。</p></body></html>", 404
+
+    @app.route('/groups')
+    def groups_page():
+        return render_template('groups.html')
+
+    @app.route('/analysis')
+    def analysis_page():
+        return render_template('analysis.html')
+
+    @app.route('/knowledge')
+    def knowledge_page():
+        return render_template('knowledge.html')
 
     # Serve WeChat built-in expression assets (dev mode only — not bundled in PyInstaller)
     _WXEMOJI_DIR = None
@@ -168,8 +179,25 @@ def create_app(decrypted_dir: str, wxid: str = None, db_dir: str = None) -> Flas
 
 
 def run_server(decrypted_dir: str, wxid: str = None, db_dir: str = None,
-               host: str = '127.0.0.1', port: int = 5000, open_url: str = None):
+               host: str = '127.0.0.1', port: int = 5051, open_url: str = None):
     app = create_app(decrypted_dir, wxid=wxid, db_dir=db_dir)
+
+    # Start AI analysis scheduler
+    try:
+        from engine.services import ai_scheduler
+        from engine.services.ai_analyzer import config_path_for
+        ai_scheduler.start_scheduler(config_path_for(decrypted_dir), decrypted_dir)
+    except Exception as e:
+        print(f"[WARN] 启动 AI 分析调度器失败: {e}")
+
+    # Start Knowledge Radar scheduler
+    try:
+        from engine.services import knowledge_scheduler
+        from engine.services.ai_analyzer import config_path_for
+        knowledge_scheduler.start_scheduler(config_path_for(decrypted_dir), decrypted_dir)
+    except Exception as e:
+        print(f"[WARN] 启动知识雷达调度器失败: {e}")
+
     url = open_url or f'http://{host}:{port}'
     timer = threading.Timer(1.0, lambda: webbrowser.open(url))
     timer.daemon = True

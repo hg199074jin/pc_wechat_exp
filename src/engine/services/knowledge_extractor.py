@@ -1,0 +1,292 @@
+"""Knowledge Radar — LLM extraction pipeline for knowledge cards."""
+from __future__ import annotations
+
+import json
+import re
+from datetime import datetime
+from typing import Dict, List, Tuple
+
+from engine.services import ai_analyzer
+
+CARD_TYPES = {
+    'audit_case', 'sop', 'prompt', 'faq', 'article', 'tool',
+    'risk', 'methodology', 'note',
+}
+
+DOMAIN_LABELS = {
+    'audit_ai': '审计/财税 + AI工具',
+    'audit': '审计/财税',
+    'ai': 'AI工具与工作流',
+    'private_domain': '私域/课程',
+    'general': '综合',
+}
+
+
+# ---------------------------------------------------------------------------
+# JSON parsing
+# ---------------------------------------------------------------------------
+
+def _extract_json_object(text: str) -> str:
+    """Best-effort extract a JSON object from LLM output."""
+    s = (text or '').strip()
+    if s.startswith('```'):
+        s = re.sub(r'^```(?:json)?\s*', '', s)
+        s = re.sub(r'\s*```$', '', s)
+    start = s.find('{')
+    end = s.rfind('}')
+    if start >= 0 and end > start:
+        return s[start:end + 1]
+    return s
+
+
+def parse_llm_cards(raw: str, min_score: int = 70) -> List[Dict]:
+    """Parse LLM JSON output into a list of validated card dicts."""
+    data = json.loads(_extract_json_object(raw))
+    cards = data.get('cards', [])
+    result = []
+    for card in cards:
+        title = (card.get('title') or '').strip()
+        score = int(card.get('score') or 0)
+        if not title or score < min_score:
+            continue
+        ctype = card.get('type') or 'note'
+        if ctype not in CARD_TYPES:
+            ctype = 'note'
+        result.append({
+            'title': title,
+            'type': ctype,
+            'score': score,
+            'summary': card.get('summary') or '',
+            'why_valuable': card.get('why_valuable') or '',
+            'content_md': card.get('content_md') or '',
+            'tags': card.get('tags') if isinstance(card.get('tags'), list) else [],
+            'source_msg_ids': card.get('source_msg_ids') if isinstance(card.get('source_msg_ids'), list) else [],
+        })
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Prompt building
+# ---------------------------------------------------------------------------
+
+def _domain_guidance(domain: str) -> str:
+    """Return domain-specific extraction guidance."""
+    guides = {
+        'audit_ai': """优先识别：
+- 审计判断口径、底稿处理经验、函证/收入/成本/往来实务案例
+- 监管检查、整改事项、风险提示
+- AI 新工具、可复用 prompt、自动化工作流、模型选择经验""",
+        'audit': """优先识别：
+- 审计判断口径、底稿处理经验
+- 函证、收入、成本、费用、往来、存货实务案例
+- 监管、财政检查、注协检查、整改事项
+- 客户资料缺口、风险提示""",
+        'ai': """优先识别：
+- 新工具和使用方法
+- 可复用 prompt 和自动化工作流
+- 安装配置踩坑、模型选择经验、token 成本经验""",
+        'private_domain': """优先识别：
+- 用户真实问题、高频需求
+- 课程反馈、可写成文章的观点
+- 可产品化的服务机会""",
+    }
+    return guides.get(domain, '综合识别所有高价值可复用知识。')
+
+
+def build_knowledge_prompt(domain: str, min_score: int, messages_text: str) -> Tuple[str, str]:
+    """Build system + user prompts for knowledge extraction."""
+    guidance = _domain_guidance(domain)
+    system = f"""你是知识资产提炼专家。你的任务不是总结聊天，而是找出值得长期沉淀和复用的知识。
+
+硬性要求：
+1. 只输出 JSON，不要 Markdown，不要解释，不要 ``` 包裹。
+2. 每条卡片 score 范围 0-100，只输出 score >= {min_score} 的内容。
+3. 每条卡片必须能转化为案例、SOP、提示词、FAQ、文章素材、工具经验、风险线索或方法论之一。
+4. source_msg_ids 必须引用消息记录中的 msg_id 数字。
+5. 宁缺毋滥：如果没有真正值得沉淀的内容，输出 {{"cards": []}}。
+
+评分维度（满分100）：
+- 可复用性 25%：能否在未来项目、客户、写作或培训中重复使用
+- 业务价值 25%：能否带来收入、效率、风险控制或客户服务价值
+- 稀缺性 15%：是否区别于普通闲聊和泛泛信息
+- 结构化程度 15%：是否包含步骤、判断框架、案例结构
+- 证据价值 10%：是否有原文、数据、具体情境支撑
+- 行动价值 10%：是否能直接形成下一步动作
+
+{guidance}"""
+
+    user = f"""消息记录:
+{messages_text}
+
+输出格式（严格 JSON）:
+{{"cards":[{{"title":"标题","type":"audit_case|sop|prompt|faq|article|tool|risk|methodology|note","score":80,"summary":"摘要","why_valuable":"为什么值得沉淀","content_md":"结构化正文","tags":["标签"],"source_msg_ids":[123]}}]}}"""
+
+    return system, user
+
+
+def build_convert_prompt(card: dict, target_type: str) -> Tuple[str, str]:
+    """Build prompts to convert a card to a structured format."""
+    type_labels = {
+        'audit_case': '审计实务案例',
+        'sop': 'SOP（标准操作流程）',
+        'prompt': '可复用 AI 提示词',
+        'faq': 'FAQ（常见问题解答）',
+        'article': '文章/课程素材',
+        'script': '客户服务话术',
+    }
+    label = type_labels.get(target_type, target_type)
+
+    system = f"""你是知识转化专家。将给定的知识卡片转化为 {label} 格式。
+要求：
+1. 只输出 Markdown 正文，不要 JSON，不要解释。
+2. 保留原文关键信息，不编造。
+3. 结构清晰，可直接使用。"""
+
+    sources_text = ''
+    for src in (card.get('sources') or []):
+        sources_text += f"\n- [{src.get('chat_name', '')}] {src.get('sender', '')}: {src.get('quote', '')}"
+
+    user = f"""知识卡片:
+标题: {card.get('title', '')}
+类型: {card.get('type', '')}
+摘要: {card.get('summary', '')}
+价值: {card.get('why_valuable', '')}
+正文:
+{card.get('content_md', '')}
+标签: {', '.join(card.get('tags', []))}
+来源引用:{sources_text}
+
+请转化为 {label} 格式的 Markdown。"""
+
+    return system, user
+
+
+# ---------------------------------------------------------------------------
+# Message formatting
+# ---------------------------------------------------------------------------
+
+def format_messages_for_knowledge(messages: list) -> str:
+    """Format messages with msg_id for knowledge extraction."""
+    lines = []
+    for msg in sorted(messages, key=lambda m: m.get('create_time') or 0):
+        msg_id = msg.get('id') or msg.get('msg_id')
+        ts = msg.get('create_time')
+        try:
+            dt = datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            dt = ''
+        sender = msg.get('sender_name') or msg.get('sender') or '未知'
+        content = (msg.get('content') or '').strip()
+        if not content:
+            continue
+        lines.append(f'[msg_id={msg_id}] [{dt}] {sender}: {content}')
+    return '\n'.join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Message loading
+# ---------------------------------------------------------------------------
+
+def load_messages_for_scan(decrypted_dir: str, chat_id: str, date: str, wxid: str = None) -> list:
+    """Load messages for a single chat on a given date."""
+    from engine.services.message import query_messages
+    result = query_messages(
+        decrypted_dir, chat_id, wxid=wxid,
+        page=1, per_page=5000,
+        start_date=date, end_date=date,
+        msg_types='1,49',
+    )
+    return result.get('messages', [])
+
+
+# ---------------------------------------------------------------------------
+# Extraction orchestration
+# ---------------------------------------------------------------------------
+
+def extract_cards_from_messages(
+    messages: list,
+    chat_name: str,
+    date: str,
+    llm_call,
+    *,
+    min_score: int = 70,
+    domain: str = 'general',
+) -> List[Dict]:
+    """Extract knowledge cards from messages using LLM.
+
+    Args:
+        messages: list of message dicts with id, create_time, sender_name, content
+        chat_name: display name of the chat
+        date: date string for card attribution
+        llm_call: callable(system, user) -> raw LLM response string
+        min_score: minimum score threshold
+        domain: extraction domain for prompt guidance
+
+    Returns:
+        list of card dicts with sources attached
+    """
+    text = format_messages_for_knowledge(messages)
+    if not text.strip():
+        return []
+
+    system, user = build_knowledge_prompt(domain, min_score, text)
+    raw = llm_call(system, user)
+    parsed = parse_llm_cards(raw, min_score=min_score)
+
+    by_id = {}
+    for m in messages:
+        mid = m.get('id') or m.get('msg_id')
+        if mid is not None:
+            by_id[mid] = m
+
+    cards = []
+    for card in parsed:
+        sources = []
+        for mid in card.pop('source_msg_ids', []):
+            msg = by_id.get(mid)
+            if not msg:
+                continue
+            sources.append({
+                'chat_id': '',
+                'chat_name': chat_name,
+                'msg_id': mid,
+                'sender': msg.get('sender_name') or msg.get('sender') or '',
+                'create_time': msg.get('create_time'),
+                'quote': (msg.get('content') or '')[:500],
+                'context': [],
+            })
+        # Fallback: attach first message as source
+        if not sources and messages:
+            msg = messages[0]
+            sources.append({
+                'chat_id': '',
+                'chat_name': chat_name,
+                'msg_id': msg.get('id') or msg.get('msg_id'),
+                'sender': msg.get('sender_name') or '',
+                'create_time': msg.get('create_time'),
+                'quote': (msg.get('content') or '')[:500],
+                'context': [],
+            })
+        card['date'] = date
+        card['sources'] = sources
+        cards.append(card)
+    return cards
+
+
+def make_llm_call(config_path: str):
+    """Create an LLM callable from the saved config."""
+    cfg = ai_analyzer.load_llm_config(config_path)
+    if not cfg.get('base_url') or not cfg.get('api_key'):
+        raise RuntimeError('LLM 未配置：请先在 AI 分析页面配置 API 地址和密钥')
+
+    def _call(system: str, user: str) -> str:
+        return ai_analyzer.call_llm(
+            system=system,
+            user=user,
+            base_url=cfg['base_url'],
+            api_key=cfg['api_key'],
+            model=cfg.get('model', ''),
+            temperature=cfg.get('temperature', 0.2),
+            max_tokens=cfg.get('max_tokens', 4096),
+        )
+    return _call
