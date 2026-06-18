@@ -127,6 +127,14 @@
     <label>Temperature <input type="number" id="cfg-temperature" class="text-input" step="0.1" min="0" max="2" value="0.3"></label>
     <label>Max Tokens <input type="number" id="cfg-max-tokens" class="text-input" min="64" max="32000" value="4096"></label>
     <label>Timeout 秒 <input type="number" id="cfg-timeout" class="text-input" min="15" max="600" value="120"></label>
+  <label>代理
+    <select id="cfg-proxy-mode" class="text-input">
+      <option value="auto">跟随系统代理（默认，访问 OpenAI 等用）</option>
+      <option value="none">不使用代理（国内服务如 MiniMax/智谱推荐）</option>
+      <option value="custom">自定义代理地址</option>
+    </select>
+  </label>
+  <label id="cfg-proxy-custom-wrap" hidden>代理地址 <input type="text" id="cfg-proxy-custom" class="text-input" placeholder="http://127.0.0.1:7890"></label>
     <div class="modal-actions">
       <button class="btn-secondary" id="test-connection">测试连接</button>
       <button class="btn-primary" id="save-config">保存</button>

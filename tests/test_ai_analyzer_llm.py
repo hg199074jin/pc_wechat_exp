@@ -66,6 +66,59 @@ def test_llm_timeout_defaults_and_bounds():
     assert _llm_timeout({'timeout': '180'}) == 180
 
 
+def test_call_llm_no_proxy_passes_empty_proxies():
+    """proxy='none' must send empty proxies so env-var proxies are bypassed."""
+    with patch('requests.post', return_value=_mock_response('ok')) as mock_post:
+        call_llm(system='s', user='u', base_url='https://x.com/v1',
+                 api_key='k', model='m', temperature=0.3, max_tokens=100,
+                 proxy='none')
+    kwargs = mock_post.call_args.kwargs
+    assert kwargs['proxies'] == {'http': None, 'https': None}
+
+
+def test_call_llm_custom_proxy_is_forwarded():
+    with patch('requests.post', return_value=_mock_response('ok')) as mock_post:
+        call_llm(system='s', user='u', base_url='https://x.com/v1',
+                 api_key='k', model='m', temperature=0.3, max_tokens=100,
+                 proxy='http://127.0.0.1:7890')
+    kwargs = mock_post.call_args.kwargs
+    assert kwargs['proxies'] == {'http': 'http://127.0.0.1:7890',
+                                 'https': 'http://127.0.0.1:7890'}
+
+
+def test_call_llm_auto_proxy_does_not_override():
+    """proxy='auto' must leave proxies as None so env vars are honoured."""
+    with patch('requests.post', return_value=_mock_response('ok')) as mock_post:
+        call_llm(system='s', user='u', base_url='https://x.com/v1',
+                 api_key='k', model='m', temperature=0.3, max_tokens=100,
+                 proxy='auto')
+    assert mock_post.call_args.kwargs['proxies'] is None
+
+
+def test_call_llm_retries_on_connection_error():
+    """ProxyError / ConnectionError are transient and should be retried."""
+    import requests as req
+    with patch('requests.post', side_effect=[
+        req.exceptions.ProxyError('proxy dropped'),
+        _mock_response('recovered'),
+    ]) as mock_post:
+        result = call_llm(system='s', user='u', base_url='https://x.com/v1',
+                          api_key='k', model='m', temperature=0.3, max_tokens=100)
+    assert result == 'recovered'
+    assert mock_post.call_count == 2
+
+
+def test_call_llm_retries_on_5xx():
+    with patch('requests.post', side_effect=[
+        _mock_response(status=502),
+        _mock_response('ok after 502'),
+    ]) as mock_post:
+        result = call_llm(system='s', user='u', base_url='https://x.com/v1',
+                          api_key='k', model='m', temperature=0.3, max_tokens=100)
+    assert result == 'ok after 502'
+    assert mock_post.call_count == 2
+
+
 def test_auto_classify_groups_uses_configured_timeout():
     with patch('engine.services.ai_analyzer.load_llm_config', return_value={
         'base_url': 'https://api.example.com/v1',

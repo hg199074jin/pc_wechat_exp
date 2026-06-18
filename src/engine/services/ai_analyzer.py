@@ -316,10 +316,18 @@ def sanitize_analysis_markdown(markdown: str, group_name: str = None) -> str:
 
 def call_llm(system: str, user: str, base_url: str, api_key: str,
              model: str, temperature: float, max_tokens: int,
-             timeout: int = 30) -> str:
+             timeout: int = 30, proxy: str = 'auto') -> str:
     """Call an OpenAI-compatible chat completion API. Returns message content.
 
-    Retries once on timeout. Raises on HTTP error or after final failure.
+    Retries on transient network errors (timeout, connection reset, proxy
+    errors, 5xx) up to 3 times with a short backoff. Raises on HTTP error or
+    after final failure.
+
+    ``proxy`` controls outbound proxy behaviour:
+    - ``'auto'`` (default): honour system proxy env vars (requests default).
+    - ``'none'``: bypass all proxy env vars (pass empty proxies), suited for
+      domestic/Chinese LLM endpoints (MiniMax/智谱) that should not be proxied.
+    - any other string: use it as an explicit proxy URL.
     """
     import requests
 
@@ -338,22 +346,51 @@ def call_llm(system: str, user: str, base_url: str, api_key: str,
         ],
     }
 
+    # Resolve proxy preference into a requests-compatible proxies mapping.
+    # None means "do not override" (use env); an explicit dict overrides env.
+    proxies = None
+    if proxy == 'none':
+        # Empty values bypass env-var proxies in requests.
+        proxies = {'http': None, 'https': None}
+    elif proxy and proxy != 'auto':
+        proxies = {'http': proxy, 'https': proxy}
+
+    import time as _time
+
     last_err = None
-    for attempt in range(2):
+    max_attempts = 3
+    for attempt in range(max_attempts):
         try:
-            resp = requests.post(url, headers=headers, json=body, timeout=timeout)
+            resp = requests.post(
+                url, headers=headers, json=body, timeout=timeout, proxies=proxies,
+            )
             if resp.status_code == 200:
                 data = resp.json()
                 return data['choices'][0]['message']['content']
+            if 500 <= resp.status_code < 600 and attempt < max_attempts - 1:
+                last_err = RuntimeError(
+                    f'LLM API error {resp.status_code}: {resp.text[:300]}')
+                _time.sleep(0.5 * (attempt + 1))
+                continue
             raise RuntimeError(f'LLM API error {resp.status_code}: {resp.text[:300]}')
         except requests.Timeout as e:
             last_err = e
-            continue
+            if attempt < max_attempts - 1:
+                _time.sleep(0.5 * (attempt + 1))
+                continue
+            raise RuntimeError(f'LLM request timed out {max_attempts} times: {e}')
+        except (requests.ConnectionError, requests.exceptions.ProxyError) as e:
+            # ProxyError / RemoteDisconnected / connection reset are transient.
+            last_err = e
+            if attempt < max_attempts - 1:
+                _time.sleep(0.5 * (attempt + 1))
+                continue
+            raise RuntimeError(f'LLM request failed after {max_attempts} retries: {e}')
         except requests.RequestException as e:
             last_err = e
             raise RuntimeError(f'LLM request failed: {e}')
 
-    raise RuntimeError(f'LLM request timed out twice: {last_err}')
+    raise RuntimeError(f'LLM request failed after {max_attempts} retries: {last_err}')
 
 
 def _llm_timeout(cfg: dict, default: int = DEFAULT_LLM_TIMEOUT) -> int:
@@ -516,6 +553,7 @@ def _call_artifact_llm(group_name: str, date: str, stats: dict,
         temperature=cfg.get('temperature', 0.2),
         max_tokens=cfg.get('max_tokens', 4096),
         timeout=_llm_timeout(cfg),
+        proxy=cfg.get('proxy', 'auto'),
     )
     try:
         return _parse_artifact_json_with_repair(raw, cfg)
@@ -523,34 +561,72 @@ def _call_artifact_llm(group_name: str, date: str, stats: dict,
         raise ValueError(f'LLM 输出不是合法 JSON: {e}')
 
 
+def _preprocess_llm_json(raw: str) -> str:
+    """Best-effort cleanup of common LLM JSON mistakes before strict parsing.
+
+    Removes ``//`` line comments, ``/* */`` block comments, and trailing
+    commas that LLMs frequently emit but strict JSON rejects. Does not attempt
+    to fix structural problems — those are left to the repair step.
+    """
+    text = raw or ''
+    # Strip /* block comments */.
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    # Strip // line comments (only when not inside a string — cheap heuristic:
+    # only remove when the rest of the line does not look quoted). We keep it
+    # simple and remove //... to end of line, which is the common LLM pattern.
+    text = re.sub(r'(^|[^:])//.*$', lambda m: m.group(1), text, flags=re.MULTILINE)
+    # Remove trailing commas before } or ].
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+    return text
+
+
 def _parse_artifact_json_with_repair(raw: str, cfg: dict) -> dict:
-    """Parse artifact JSON. If malformed, ask the LLM to repair JSON once."""
+    """Parse artifact JSON with regex preprocessing and LLM repair fallback.
+
+    Pipeline: regex preprocess -> strict parse -> up to 2 LLM repair rounds.
+    Each repair round feeds the previous error back so the model can target it.
+    """
+    preprocessed = _preprocess_llm_json(raw)
     try:
-        return parse_artifact_json(raw)
+        return parse_artifact_json(preprocessed)
     except Exception as first_error:
-        system = (
-            '你是 JSON 修复器。只输出修复后的合法 JSON 对象，不要输出 Markdown、解释、前后缀。'
-            '不要改写字段含义，不要新增事实；只修复逗号、引号、转义、截断前后缀等格式问题。'
-        )
-        user = (
-            f'下面内容应当是一份群聊分析 artifact JSON，但解析失败：{first_error}\n'
-            '请修复为合法 JSON 对象。\n\n'
-            f'{raw}'
-        )
-        repaired = call_llm(
-            system=system,
-            user=user,
-            base_url=cfg['base_url'],
-            api_key=cfg['api_key'],
-            model=cfg['model'],
-            temperature=0,
-            max_tokens=cfg.get('max_tokens', 4096),
-            timeout=_llm_timeout(cfg),
-        )
-        try:
-            return parse_artifact_json(repaired)
-        except Exception as repair_error:
-            raise ValueError(f'{first_error}; 修复后仍失败: {repair_error}')
+        error = first_error
+        current = preprocessed
+        max_repairs = 2
+        for attempt in range(max_repairs):
+            system = (
+                '你是严格的 JSON 修复器。只输出修复后的合法 JSON 对象，'
+                '不要输出 Markdown、```代码块、解释或任何前后缀文字。'
+                '硬性要求：'
+                '1. 保持原有字段名和字段值完全不变，只修复 JSON 语法错误；'
+                '2. 所有键名和字符串值必须用双引号；'
+                '3. 去除尾随逗号、注释、单引号；'
+                '4. 输出必须是单个完整的 JSON 对象，以 { 开头、以 } 结尾。'
+            )
+            user = (
+                f'下面内容应当是一份群聊分析 artifact JSON，但解析失败（第{attempt + 1}次修复）：{error}\n'
+                '请只修复 JSON 语法，输出合法 JSON 对象。\n\n'
+                f'{current}'
+            )
+            repaired = call_llm(
+                system=system,
+                user=user,
+                base_url=cfg['base_url'],
+                api_key=cfg['api_key'],
+                model=cfg['model'],
+                temperature=0,
+                max_tokens=cfg.get('max_tokens', 4096),
+                timeout=_llm_timeout(cfg),
+                proxy=cfg.get('proxy', 'auto'),
+            )
+            repaired = _preprocess_llm_json(repaired)
+            try:
+                return parse_artifact_json(repaired)
+            except Exception as repair_error:
+                error = repair_error
+                current = repaired
+                continue
+        raise ValueError(f'{first_error}; 修复 {max_repairs} 次后仍失败: {error}')
 
 
 def _rollup_artifacts(group_name: str, date: str, stats: dict,
@@ -579,6 +655,7 @@ def _rollup_artifacts(group_name: str, date: str, stats: dict,
         temperature=cfg.get('temperature', 0.2),
         max_tokens=cfg.get('max_tokens', 4096),
         timeout=_llm_timeout(cfg),
+        proxy=cfg.get('proxy', 'auto'),
     )
     try:
         return _parse_artifact_json_with_repair(raw, cfg)
@@ -935,6 +1012,7 @@ def auto_classify_groups(group_names: list, batch_size: int = 80,
                     temperature=cfg.get('temperature', 0.3),
                     max_tokens=cfg.get('max_tokens', 4096),
                     timeout=_llm_timeout(cfg),
+                    proxy=cfg.get('proxy', 'auto'),
                 )
                 parsed = _json.loads(content)
                 for cat, names in parsed.items():

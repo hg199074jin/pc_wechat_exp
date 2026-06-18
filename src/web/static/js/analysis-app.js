@@ -175,6 +175,7 @@ const AnalysisApp = {
       document.getElementById('cfg-max-tokens').value = cfg.max_tokens || 4096;
       const timeoutEl = document.getElementById('cfg-timeout');
       if (timeoutEl) timeoutEl.value = cfg.timeout || 120;
+      this._loadProxyIntoUi(cfg.proxy || 'auto');
       document.getElementById('llm-status').textContent =
         cfg.base_url ? `当前: ${cfg.model || '?'} @ ${cfg.base_url}` : '未配置';
     } catch (e) { /* ignore */ }
@@ -188,6 +189,7 @@ const AnalysisApp = {
       temperature: parseFloat(document.getElementById('cfg-temperature').value) || 0.3,
       max_tokens: parseInt(document.getElementById('cfg-max-tokens').value, 10) || 4096,
       timeout: parseInt(document.getElementById('cfg-timeout')?.value, 10) || 120,
+      proxy: this._collectProxyFromUi(),
     };
     if (!llm.base_url || !llm.api_key || !llm.model) {
       alert('请填写完整 LLM 配置'); return;
@@ -210,6 +212,40 @@ const AnalysisApp = {
       const data = await r.json();
       out.textContent = data.ok ? `✅ 成功: ${data.reply || ''}` : `❌ 失败: ${data.error}`;
     } catch (e) { out.textContent = `❌ 请求失败: ${e.message}`; }
+  },
+
+  _loadProxyIntoUi(proxy) {
+    const modeSel = document.getElementById('cfg-proxy-mode');
+    const customWrap = document.getElementById('cfg-proxy-custom-wrap');
+    const customInput = document.getElementById('cfg-proxy-custom');
+    if (!modeSel) return;
+    if (proxy === 'auto' || proxy === 'none' || !proxy) {
+      modeSel.value = proxy || 'auto';
+      if (customWrap) customWrap.hidden = true;
+    } else {
+      modeSel.value = 'custom';
+      if (customWrap) customWrap.hidden = false;
+      if (customInput) customInput.value = proxy;
+    }
+    // Toggle custom input visibility when the mode changes.
+    if (!modeSel.dataset.bound) {
+      modeSel.addEventListener('change', () => {
+        const wrap = document.getElementById('cfg-proxy-custom-wrap');
+        if (wrap) wrap.hidden = modeSel.value !== 'custom';
+      });
+      modeSel.dataset.bound = '1';
+    }
+  },
+
+  _collectProxyFromUi() {
+    const modeSel = document.getElementById('cfg-proxy-mode');
+    if (!modeSel) return 'auto';
+    const mode = modeSel.value;
+    if (mode === 'custom') {
+      const custom = document.getElementById('cfg-proxy-custom')?.value.trim();
+      return custom || 'auto';
+    }
+    return mode;  // 'auto' or 'none'
   },
 
   // -------------------------------------------------------------------

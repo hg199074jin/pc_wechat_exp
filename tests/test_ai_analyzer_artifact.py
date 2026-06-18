@@ -164,3 +164,50 @@ def test_analyze_group_repairs_malformed_artifact_json_once():
         assert count == 1
         assert mock_call.call_count == 2
         assert 'Repair Group' in markdown
+
+
+def test_preprocess_llm_json_strips_comments_and_trailing_commas():
+    from engine.services.ai_analyzer import _preprocess_llm_json
+    # Trailing commas before } and ].
+    assert _preprocess_llm_json('{"a": 1,}') == '{"a": 1}'
+    assert _preprocess_llm_json('{"a": [1, 2,],}') == '{"a": [1, 2]}'
+    # Line comments are stripped.
+    assert 'comment' not in _preprocess_llm_json('{"a": 1 // comment\n}')
+    # Block comments are stripped.
+    assert 'x' not in _preprocess_llm_json('{"a": /* x */ 1}')
+
+
+def test_preprocess_llm_json_recovers_via_parse():
+    """Trailing-comma cleanup should let parse_artifact_json succeed."""
+    from engine.services.ai_analyzer import _preprocess_llm_json, parse_artifact_json
+    raw = '{"summary": "ok", "topics": [],}'
+    fixed = _preprocess_llm_json(raw)
+    data = parse_artifact_json(fixed)
+    assert data['summary'] == 'ok'
+
+
+def test_repair_succeeds_on_second_round():
+    """First repair fails, second repair succeeds (2-round retry loop)."""
+    from engine.services.ai_analyzer import _parse_artifact_json_with_repair
+    good = json.dumps({'summary': 'ok', 'topics': []}, ensure_ascii=False)
+    cfg = {'base_url': 'u', 'api_key': 'k', 'model': 'm'}
+    # Round 1 returns bad JSON, round 2 returns good JSON.
+    with patch('engine.services.ai_analyzer.call_llm',
+               side_effect=['{bad', good]) as mock_call:
+        result = _parse_artifact_json_with_repair('{originally broken', cfg)
+    assert result['summary'] == 'ok'
+    assert mock_call.call_count == 2
+
+
+def test_repair_exhausts_rounds_and_raises():
+    """Both repair rounds fail -> ValueError mentions 2 attempts."""
+    from engine.services.ai_analyzer import _parse_artifact_json_with_repair
+    cfg = {'base_url': 'u', 'api_key': 'k', 'model': 'm'}
+    with patch('engine.services.ai_analyzer.call_llm',
+               side_effect=['{still bad', '{still bad 2']) as mock_call:
+        try:
+            _parse_artifact_json_with_repair('{broken', cfg)
+            raise AssertionError('expected ValueError')
+        except ValueError as e:
+            assert '修复' in str(e)
+    assert mock_call.call_count == 2

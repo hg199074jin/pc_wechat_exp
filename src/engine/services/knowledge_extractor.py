@@ -486,5 +486,6 @@ def make_llm_call(config_path: str):
             temperature=cfg.get('temperature', 0.2),
             max_tokens=cfg.get('max_tokens', 4096),
             timeout=ai_analyzer._llm_timeout(cfg),
+            proxy=cfg.get('proxy', 'auto'),
         )
     return _call
