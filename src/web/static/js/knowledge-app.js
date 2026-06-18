@@ -377,8 +377,52 @@ const KnowledgeApp = {
   // -----------------------------------------------------------------------
 
   openScanModal() {
+    this.ensureScanModeControls();
+    this.ensureKnowledgeSourceControls();
     this._renderTagPicker('scan-tag-picker');
     document.getElementById('scan-modal').classList.add('show');
+  },
+
+  ensureScanModeControls() {
+    if (document.getElementById('scan-mode-controls')) return;
+    const dateTo = document.getElementById('scan-date-to');
+    if (!dateTo) return;
+    const box = document.createElement('div');
+    box.id = 'scan-mode-controls';
+    box.className = 'scan-mode-controls';
+    box.innerHTML = `
+      <div class="scan-mode-title">扫描方式</div>
+      <label><input type="radio" name="scan-mode" value="range" checked> 按时间段扫描</label>
+      <label><input type="radio" name="scan-mode" value="daily"> 按天扫描</label>`;
+    const row = dateTo.closest('.form-row') || dateTo.parentNode;
+    row.insertAdjacentElement('afterend', box);
+
+    if (!document.getElementById('scan-mode-style')) {
+      const style = document.createElement('style');
+      style.id = 'scan-mode-style';
+      style.textContent = `
+        .scan-mode-controls { margin: 0 0 12px; padding: 8px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; }
+        .scan-mode-title { color: #8b949e; font-size: 12px; margin-bottom: 6px; }
+        .scan-mode-controls label { display: flex; align-items: center; gap: 6px; color: #c9d1d9; font-size: 12px; line-height: 1.8; }
+        .scan-mode-controls input { margin: 0; }
+      `;
+      document.head.appendChild(style);
+    }
+  },
+
+  ensureKnowledgeSourceControls() {
+    if (document.getElementById('knowledge-source-controls')) return;
+    const mode = document.getElementById('scan-mode-controls');
+    if (!mode) return;
+    const box = document.createElement('div');
+    box.id = 'knowledge-source-controls';
+    box.className = 'scan-mode-controls';
+    box.innerHTML = `
+      <div class="scan-mode-title">知识来源</div>
+      <label><input type="radio" name="knowledge-source" value="llm" checked> 高质量扫描原始消息</label>
+      <label><input type="radio" name="knowledge-source" value="auto"> 优先复用 AI 分析结果</label>
+      <label><input type="radio" name="knowledge-source" value="artifact_only"> 只使用已有 AI 分析结果</label>`;
+    mode.insertAdjacentElement('afterend', box);
   },
 
   closeScanModal() {
@@ -401,6 +445,10 @@ const KnowledgeApp = {
     const minScore = Number(document.getElementById('scan-min-score').value || 70);
     const maxCards = Number(document.getElementById('scan-max-cards').value || 30);
     const domain = document.getElementById('scan-domain').value || 'general';
+    const modeEl = document.querySelector('input[name="scan-mode"]:checked');
+    const scanMode = modeEl ? modeEl.value : 'range';
+    const sourceEl = document.querySelector('input[name="knowledge-source"]:checked');
+    const knowledgeSource = sourceEl ? sourceEl.value : 'llm';
 
     if (!dateFrom || !dateTo) { alert('请选择日期范围'); return; }
     if (!chatIds.length) { alert('请至少选择一个群聊'); return; }
@@ -423,6 +471,8 @@ const KnowledgeApp = {
           min_score: minScore,
           max_cards: maxCards,
           domain: domain,
+          scan_mode: scanMode,
+          knowledge_source: knowledgeSource,
         }),
       });
 
@@ -453,7 +503,9 @@ const KnowledgeApp = {
               statusEl.textContent = ev.detail || '处理中...';
               barEl.style.width = Math.round((ev.progress || 0) * 100) + '%';
             } else if (ev.stage === 'done') {
-              statusEl.textContent = `✅ 完成！${ev.result?.card_count || 0} 条知识卡片`;
+              const reused = ev.result?.reused_artifacts || 0;
+              const suffix = reused ? `，复用 ${reused} 个 AI 分析结果` : '';
+              statusEl.textContent = `✅ 完成！${ev.result?.card_count || 0} 条知识卡片${suffix}`;
               barEl.style.width = '100%';
               this.loadCards();
               this.loadStats();

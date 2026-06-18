@@ -9,7 +9,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from engine.services.knowledge_extractor import (
     parse_llm_cards, build_knowledge_prompt, format_messages_for_knowledge,
     extract_cards_from_messages, build_convert_prompt, _extract_json_object,
-    make_llm_call, readable_message_text,
+    make_llm_call, readable_message_text, load_messages_for_scan,
+    extract_cards_from_messages_chunked, dedupe_knowledge_cards,
 )
 
 
@@ -195,3 +196,50 @@ def test_make_llm_call_uses_configured_timeout():
         llm_call = make_llm_call('dummy')
         llm_call('system', 'user')
     assert mock_call.call_args.kwargs['timeout'] == 600
+
+
+def test_load_messages_for_scan_accepts_end_date():
+    with patch('engine.services.message.query_messages', return_value={'messages': []}) as mock_query:
+        load_messages_for_scan('decrypted', 'c@chatroom', '2026-06-01', wxid='me', end_date='2026-06-19')
+    assert mock_query.call_args.kwargs['start_date'] == '2026-06-01'
+    assert mock_query.call_args.kwargs['end_date'] == '2026-06-19'
+
+
+def test_dedupe_knowledge_cards_merges_sources_and_tags():
+    cards = [
+        {'title': 'Same', 'score': 80, 'tags': ['AI'], 'sources': [{'chat_id': 'c', 'msg_id': 1}]},
+        {'title': 'Same', 'score': 90, 'tags': ['Audit'], 'sources': [{'chat_id': 'c', 'msg_id': 2}]},
+    ]
+    merged = dedupe_knowledge_cards(cards)
+    assert len(merged) == 1
+    assert merged[0]['score'] == 90
+    assert merged[0]['tags'] == ['AI', 'Audit']
+    assert [s['msg_id'] for s in merged[0]['sources']] == [2, 1]
+
+
+def test_extract_cards_from_messages_chunked_dedupes_large_inputs():
+    messages = []
+    for i in range(20):
+        messages.append({
+            'id': i,
+            'create_time': i,
+            'sender_name': 'A',
+            'content': 'x' * 700,
+        })
+
+    def fake_llm(system, user):
+        first_id = 0
+        if '[msg_id=' in user:
+            first_id = int(user.split('[msg_id=')[1].split(']')[0])
+        return json.dumps({"cards": [{
+            "title": "Same", "type": "note", "score": 80,
+            "summary": "s", "why_valuable": "w", "content_md": "c",
+            "tags": ["T"], "source_msg_ids": [first_id],
+        }]})
+
+    cards = extract_cards_from_messages_chunked(
+        messages, 'chat', '2026-06-01_to_2026-06-19', fake_llm, min_score=0
+    )
+    assert len(cards) == 1
+    assert cards[0]['date'] == '2026-06-01_to_2026-06-19'
+    assert len(cards[0]['sources']) >= 1

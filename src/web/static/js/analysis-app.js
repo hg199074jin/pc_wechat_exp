@@ -18,6 +18,7 @@ const AnalysisApp = {
     this.ensureGroupPickerUi();
     this.ensureResultArtifactUi();
     this.ensureDateQuickControls();
+    this.ensureAnalysisModeControls();
     this.loadConfig();
     this.loadTagTree();
     this.loadResults();
@@ -56,6 +57,35 @@ const AnalysisApp = {
     start.setDate(end.getDate() - n + 1);
     document.getElementById('date-from').value = start.toISOString().slice(0, 10);
     document.getElementById('date-to').value = end.toISOString().slice(0, 10);
+  },
+
+  ensureAnalysisModeControls() {
+    if (document.getElementById('analysis-mode-controls')) return;
+    const dateTo = document.getElementById('date-to');
+    if (!dateTo || !dateTo.parentNode) return;
+    const box = document.createElement('div');
+    box.id = 'analysis-mode-controls';
+    box.className = 'analysis-mode-controls';
+    box.innerHTML = `
+      <div class="analysis-mode-title">分析方式</div>
+      <label class="analysis-mode-option"><input type="radio" name="analysis-mode" value="range" checked><span>按时间段分析</span></label>
+      <label class="analysis-mode-option"><input type="radio" name="analysis-mode" value="daily"><span>按天分析</span></label>`;
+    const quick = document.getElementById('date-quick-actions');
+    (quick || dateTo).insertAdjacentElement('afterend', box);
+
+    if (!document.getElementById('analysis-mode-style')) {
+      const style = document.createElement('style');
+      style.id = 'analysis-mode-style';
+      style.textContent = `
+        .analysis-mode-controls { margin-top: 10px; padding: 8px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; }
+        .analysis-mode-title { color: #8b949e; font-size: 12px; margin-bottom: 6px; }
+        .analysis-mode-controls .analysis-mode-option { display: flex; flex-direction: row; align-items: center; padding-left: 0; color: #c9d1d9; font-size: 12px; line-height: 1.8; cursor: pointer; }
+        .analysis-mode-controls .analysis-mode-option + .analysis-mode-option { margin-top: 2px; }
+        .analysis-mode-controls .analysis-mode-option input { flex: 0 0 auto; width: 12px; height: 12px; margin: 0 8px 0 0; }
+        .analysis-mode-controls .analysis-mode-option span { flex: 1 1 auto; }
+      `;
+      document.head.appendChild(style);
+    }
   },
 
   ensureGroupPickerUi() {
@@ -761,6 +791,8 @@ const AnalysisApp = {
     if (chatIds.length === 0) { alert('请至少选择一个群'); return; }
     const dateFrom = document.getElementById('date-from').value;
     const dateTo = document.getElementById('date-to').value;
+    const modeEl = document.querySelector('input[name="analysis-mode"]:checked');
+    const analysisMode = modeEl ? modeEl.value : 'range';
     if (!dateFrom || !dateTo) { alert('请选择日期范围'); return; }
 
     document.getElementById('run-progress').hidden = false;
@@ -771,7 +803,11 @@ const AnalysisApp = {
     try {
       const r = await fetch('/api/analysis/run', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({chat_ids: chatIds, date_range: [dateFrom, dateTo]}),
+        body: JSON.stringify({
+          chat_ids: chatIds,
+          date_range: [dateFrom, dateTo],
+          analysis_mode: analysisMode,
+        }),
       });
       if (!r.ok) {
         text.textContent = '启动失败: ' + (await r.text());

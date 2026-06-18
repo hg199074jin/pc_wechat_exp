@@ -97,3 +97,70 @@ def test_analyze_group_invalid_json_returns_error():
         assert status == 'error'
         assert count == 1
         assert '合法 JSON' in msg
+
+
+def test_analyze_group_range_uses_date_range_and_saves_range_label():
+    raw = json.dumps({
+        'summary': 'range summary',
+        'topics': [{
+            'title': 'range topic',
+            'summary': 'range topic summary',
+            'participants': ['A'],
+            'evidence': [{'msg_id': 1, 'sender': 'A', 'quote': 'range'}],
+            'knowledge_candidates': [],
+        }],
+    }, ensure_ascii=False)
+    with tempfile.TemporaryDirectory() as tmp:
+        decrypted = os.path.join(tmp, 'backup')
+        os.makedirs(decrypted)
+        with patch('engine.services.ai_analyzer.load_llm_config', return_value={
+            'base_url': 'https://api.example.com/v1',
+            'api_key': 'sk',
+            'model': 'm',
+        }), patch('engine.services.ai_analyzer.query_messages', return_value={'messages': _messages()}) as mock_query, \
+                patch('engine.services.ai_analyzer.call_llm', return_value=raw):
+            markdown, status, count = ai_analyzer.analyze_group_range(
+                decrypted, 'c@chatroom', 'Range Group', '2026-06-01', '2026-06-19'
+            )
+
+        assert status == 'ok'
+        assert count == 1
+        assert 'Range Group' in markdown
+        assert mock_query.call_args.kwargs['start_date'] == '2026-06-01'
+        assert mock_query.call_args.kwargs['end_date'] == '2026-06-19'
+        artifact = load_artifact(
+            ai_analyzer.storage_dir_for(decrypted),
+            'c@chatroom',
+            '2026-06-01_to_2026-06-19',
+        )
+        assert artifact['date'] == '2026-06-01_to_2026-06-19'
+
+
+def test_analyze_group_repairs_malformed_artifact_json_once():
+    repaired = json.dumps({
+        'summary': 'repaired',
+        'topics': [{
+            'title': 'fixed',
+            'summary': 'fixed summary',
+            'participants': ['A'],
+            'evidence': [{'msg_id': 1, 'sender': 'A', 'quote': 'fixed'}],
+            'knowledge_candidates': [],
+        }],
+    }, ensure_ascii=False)
+    with tempfile.TemporaryDirectory() as tmp:
+        decrypted = os.path.join(tmp, 'backup')
+        os.makedirs(decrypted)
+        with patch('engine.services.ai_analyzer.load_llm_config', return_value={
+            'base_url': 'https://api.example.com/v1',
+            'api_key': 'sk',
+            'model': 'm',
+        }), patch('engine.services.ai_analyzer.query_messages', return_value={'messages': _messages()}), \
+                patch('engine.services.ai_analyzer.call_llm', side_effect=['{"summary":"broken"', repaired]) as mock_call:
+            markdown, status, count = ai_analyzer.analyze_group(
+                decrypted, 'c@chatroom', 'Repair Group', '2026-06-15'
+            )
+
+        assert status == 'ok'
+        assert count == 1
+        assert mock_call.call_count == 2
+        assert 'Repair Group' in markdown

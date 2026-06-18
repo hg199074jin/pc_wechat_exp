@@ -14,6 +14,10 @@ CARD_TYPES = {
     'risk', 'methodology', 'note',
 }
 
+KNOWLEDGE_CHUNK_CHAR_THRESHOLD = 12000
+KNOWLEDGE_CHUNK_CHAR_SIZE = 6000
+MAX_KNOWLEDGE_CHUNKS = 8
+
 
 def readable_message_text(content: str) -> str:
     """Return human-readable text from WeChat message content.
@@ -193,7 +197,9 @@ def format_messages_for_knowledge(messages: list) -> str:
     """Format messages with msg_id for knowledge extraction."""
     lines = []
     for msg in sorted(messages, key=lambda m: m.get('create_time') or 0):
-        msg_id = msg.get('id') or msg.get('msg_id')
+        msg_id = msg.get('id')
+        if msg_id is None:
+            msg_id = msg.get('msg_id')
         ts = msg.get('create_time')
         try:
             dt = datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d %H:%M')
@@ -212,13 +218,14 @@ def format_messages_for_knowledge(messages: list) -> str:
 # Message loading
 # ---------------------------------------------------------------------------
 
-def load_messages_for_scan(decrypted_dir: str, chat_id: str, date: str, wxid: str = None) -> list:
-    """Load messages for a single chat on a given date."""
+def load_messages_for_scan(decrypted_dir: str, chat_id: str, date: str,
+                           wxid: str = None, end_date: str = None) -> list:
+    """Load messages for a single chat on one day or a date range."""
     from engine.services.message import query_messages
     result = query_messages(
         decrypted_dir, chat_id, wxid=wxid,
         page=1, per_page=5000,
-        start_date=date, end_date=date,
+        start_date=date, end_date=end_date or date,
         msg_types='1,49',
     )
     return result.get('messages', [])
@@ -227,6 +234,93 @@ def load_messages_for_scan(decrypted_dir: str, chat_id: str, date: str, wxid: st
 # ---------------------------------------------------------------------------
 # Extraction orchestration
 # ---------------------------------------------------------------------------
+
+def _chunk_messages_for_knowledge(messages: list, *, max_chars: int = KNOWLEDGE_CHUNK_CHAR_SIZE) -> list:
+    """Split messages into chunks that fit the knowledge extraction prompt."""
+    chunks = []
+    current = []
+    current_len = 0
+    for msg in sorted(messages or [], key=lambda m: m.get('create_time') or 0):
+        text = format_messages_for_knowledge([msg])
+        if not text.strip():
+            continue
+        if current and current_len + len(text) > max_chars:
+            chunks.append(current)
+            current = []
+            current_len = 0
+        current.append(msg)
+        current_len += len(text)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _card_dedupe_key(card: dict) -> str:
+    title = (card.get('title') or '').strip().lower()
+    if title:
+        return title
+    return (card.get('summary') or '').strip().lower()[:120]
+
+
+def dedupe_knowledge_cards(cards: list) -> list:
+    """Merge duplicate cards produced by chunked extraction."""
+    merged = {}
+    order = []
+    for card in cards or []:
+        key = _card_dedupe_key(card) or str(len(order))
+        if key not in merged:
+            merged[key] = card
+            order.append(key)
+            continue
+
+        old = merged[key]
+        if int(card.get('score') or 0) > int(old.get('score') or 0):
+            card, old = old, card
+            merged[key] = old
+
+        seen_sources = {
+            (src.get('chat_id'), src.get('msg_id'), src.get('create_time'))
+            for src in old.get('sources', [])
+        }
+        for src in card.get('sources', []):
+            sig = (src.get('chat_id'), src.get('msg_id'), src.get('create_time'))
+            if sig not in seen_sources:
+                old.setdefault('sources', []).append(src)
+                seen_sources.add(sig)
+        old['tags'] = sorted(set((old.get('tags') or []) + (card.get('tags') or [])))
+    return [merged[key] for key in order]
+
+
+def extract_cards_from_messages_chunked(
+    messages: list,
+    chat_name: str,
+    date: str,
+    llm_call,
+    *,
+    min_score: int = 70,
+    domain: str = 'general',
+) -> List[Dict]:
+    """Extract knowledge cards, chunking long date ranges before LLM calls."""
+    text = format_messages_for_knowledge(messages)
+    if not text.strip():
+        return []
+    if len(text) <= KNOWLEDGE_CHUNK_CHAR_THRESHOLD:
+        return extract_cards_from_messages(
+            messages, chat_name, date, llm_call,
+            min_score=min_score, domain=domain,
+        )
+
+    chunks = _chunk_messages_for_knowledge(messages)
+    if len(chunks) > MAX_KNOWLEDGE_CHUNKS:
+        chunks = chunks[-MAX_KNOWLEDGE_CHUNKS:]
+    cards = []
+    for chunk in chunks:
+        cards.extend(extract_cards_from_messages(
+            chunk, chat_name, date, llm_call,
+            min_score=min_score, domain=domain,
+        ))
+    return dedupe_knowledge_cards(cards)
+
 
 def extract_cards_from_messages(
     messages: list,
@@ -260,7 +354,9 @@ def extract_cards_from_messages(
 
     by_id = {}
     for m in messages:
-        mid = m.get('id') or m.get('msg_id')
+        mid = m.get('id')
+        if mid is None:
+            mid = m.get('msg_id')
         if mid is not None:
             by_id[mid] = m
 
@@ -286,7 +382,7 @@ def extract_cards_from_messages(
             sources.append({
                 'chat_id': '',
                 'chat_name': chat_name,
-                'msg_id': msg.get('id') or msg.get('msg_id'),
+                'msg_id': msg.get('id') if msg.get('id') is not None else msg.get('msg_id'),
                 'sender': msg.get('sender_name') or '',
                 'create_time': msg.get('create_time'),
                 'quote': readable_message_text(msg.get('content') or '')[:500],

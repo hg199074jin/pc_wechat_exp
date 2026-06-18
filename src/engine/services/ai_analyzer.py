@@ -484,6 +484,13 @@ def result_path(storage_dir: str, chat_id: str, date: str) -> str:
     return os.path.join(storage_dir, safe_id, f'{date}.md')
 
 
+def period_label(start_date: str, end_date: str) -> str:
+    """Return a filesystem/URL-safe label for an analysis date range."""
+    if not end_date or start_date == end_date:
+        return start_date
+    return f'{start_date}_to_{end_date}'
+
+
 def storage_dir_for(decrypted_dir: str) -> str:
     """Get the AI analysis storage directory for a given decrypted data root."""
     return os.path.join(os.path.dirname(decrypted_dir), 'ai_analysis')
@@ -511,9 +518,39 @@ def _call_artifact_llm(group_name: str, date: str, stats: dict,
         timeout=_llm_timeout(cfg),
     )
     try:
-        return parse_artifact_json(raw)
+        return _parse_artifact_json_with_repair(raw, cfg)
     except Exception as e:
         raise ValueError(f'LLM 输出不是合法 JSON: {e}')
+
+
+def _parse_artifact_json_with_repair(raw: str, cfg: dict) -> dict:
+    """Parse artifact JSON. If malformed, ask the LLM to repair JSON once."""
+    try:
+        return parse_artifact_json(raw)
+    except Exception as first_error:
+        system = (
+            '你是 JSON 修复器。只输出修复后的合法 JSON 对象，不要输出 Markdown、解释、前后缀。'
+            '不要改写字段含义，不要新增事实；只修复逗号、引号、转义、截断前后缀等格式问题。'
+        )
+        user = (
+            f'下面内容应当是一份群聊分析 artifact JSON，但解析失败：{first_error}\n'
+            '请修复为合法 JSON 对象。\n\n'
+            f'{raw}'
+        )
+        repaired = call_llm(
+            system=system,
+            user=user,
+            base_url=cfg['base_url'],
+            api_key=cfg['api_key'],
+            model=cfg['model'],
+            temperature=0,
+            max_tokens=cfg.get('max_tokens', 4096),
+            timeout=_llm_timeout(cfg),
+        )
+        try:
+            return parse_artifact_json(repaired)
+        except Exception as repair_error:
+            raise ValueError(f'{first_error}; 修复后仍失败: {repair_error}')
 
 
 def _rollup_artifacts(group_name: str, date: str, stats: dict,
@@ -544,7 +581,7 @@ def _rollup_artifacts(group_name: str, date: str, stats: dict,
         timeout=_llm_timeout(cfg),
     )
     try:
-        return parse_artifact_json(raw)
+        return _parse_artifact_json_with_repair(raw, cfg)
     except Exception as e:
         raise ValueError(f'LLM 输出不是合法 JSON: {e}')
 
@@ -649,6 +686,105 @@ def analyze_group(decrypted_dir: str, chat_id: str, group_name: str,
     return markdown, 'ok', len(messages)
 
 
+def analyze_group_range(decrypted_dir: str, chat_id: str, group_name: str,
+                        start_date: str, end_date: str, wxid: str = None,
+                        config_path: str = None,
+                        progress_cb: Optional[Callable] = None) -> Tuple[str, str, int]:
+    """Analyze one group for a date range and save it under a range label."""
+    label = period_label(start_date, end_date)
+    cfg_path = config_path or config_path_for(decrypted_dir)
+    cfg = load_llm_config(cfg_path)
+
+    if not cfg.get('base_url') or not cfg.get('api_key') or not cfg.get('model'):
+        return 'LLM 未配置', 'error', 0
+
+    try:
+        result = query_messages(
+            decrypted_dir, chat_id, wxid=wxid,
+            page=1, per_page=MAX_MSG_PER_GROUP * 2,
+            start_date=start_date, end_date=end_date,
+            msg_types=_ANALYZE_TYPES,
+        )
+        messages = result.get('messages', [])
+    except FileNotFoundError:
+        return '未找到该时间段的聊天数据库', 'skip', 0
+    except Exception as e:
+        return f'查询消息失败: {e}', 'error', 0
+
+    if not messages:
+        return '该时间段没有可分析的文字/链接消息', 'skip', 0
+
+    formatted = format_messages_for_artifact(messages)
+    if not formatted.strip():
+        return '该时间段消息主要是图片、语音、文件或系统消息，暂无可总结文本', 'skip', len(messages)
+
+    stats = _compute_message_stats(messages, formatted)
+    stats['start_date'] = start_date
+    stats['end_date'] = end_date
+    style_prompt = ''
+    try:
+        style_prompt = style_to_prompt(ensure_style(decrypted_dir, chat_id, group_name))
+    except Exception:
+        style_prompt = ''
+
+    if progress_cb:
+        progress_cb(chat_id, group_name, 'extracting_artifact', len(messages))
+
+    try:
+        if len(formatted) > ARTIFACT_CHUNK_CHAR_THRESHOLD:
+            chunks = _chunk_text_by_line(formatted)
+            if len(chunks) > MAX_ARTIFACT_CHUNKS:
+                chunks = chunks[-MAX_ARTIFACT_CHUNKS:]
+                stats['truncated'] = True
+            stats['chunked'] = True
+            stats['chunks'] = len(chunks)
+            partials = []
+            for chunk in chunks:
+                partials.append(_call_artifact_llm(
+                    group_name, label, stats, chunk, style_prompt, cfg, partial=True
+                ))
+            artifact_data = _rollup_artifacts(group_name, label, stats, partials, style_prompt, cfg)
+        else:
+            artifact_data = _call_artifact_llm(
+                group_name, label, stats, formatted, style_prompt, cfg, partial=False
+            )
+    except ValueError as e:
+        return str(e), 'error', len(messages)
+    except Exception as e:
+        return str(e), 'error', len(messages)
+
+    if progress_cb:
+        progress_cb(chat_id, group_name, 'verifying_evidence', len(messages))
+    artifact = normalize_artifact(
+        artifact_data,
+        chat_id=chat_id,
+        group_name=group_name,
+        date=label,
+        stats=stats,
+    )
+    artifact['verify'] = verify_artifact_evidence(artifact, messages)
+    save_artifact(storage_dir_for(decrypted_dir), artifact)
+
+    if progress_cb:
+        candidates_count = sum(
+            len(topic.get('knowledge_candidates') or [])
+            for topic in artifact.get('topics') or []
+        )
+        progress_cb(chat_id, group_name, 'rendering_report', candidates_count)
+    markdown = render_markdown_report(artifact)
+    markdown = sanitize_analysis_markdown(markdown, group_name)
+
+    out = result_path(storage_dir_for(decrypted_dir), chat_id, label)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    try:
+        with open(out, 'w', encoding='utf-8') as f:
+            f.write(markdown)
+    except OSError as e:
+        return f'保存失败: {e}', 'error', len(messages)
+
+    return markdown, 'ok', len(messages)
+
+
 def analyze_multiple(decrypted_dir: str, chat_ids: list, group_names: dict,
                      date: str, wxid: str = None,
                      progress_cb: Optional[Callable] = None) -> List[Dict]:
@@ -677,6 +813,39 @@ def analyze_multiple(decrypted_dir: str, chat_ids: list, group_names: dict,
             'group_name': group_name,
             'status': status,
             'msg_count': msg_count,
+            'error': '' if status == 'ok' else md,
+        })
+        if progress_cb:
+            progress_cb(chat_id, group_name, 'done' if status == 'ok' else status, i, total)
+    return results
+
+
+def analyze_multiple_range(decrypted_dir: str, chat_ids: list, group_names: dict,
+                           start_date: str, end_date: str, wxid: str = None,
+                           progress_cb: Optional[Callable] = None) -> List[Dict]:
+    """Analyze multiple groups for one date range."""
+    results = []
+    total = len(chat_ids)
+    label = period_label(start_date, end_date)
+    for i, chat_id in enumerate(chat_ids, 1):
+        group_name = group_names.get(chat_id, chat_id)
+        if progress_cb:
+            progress_cb(chat_id, group_name, 'analyzing', i, total)
+        md, status, msg_count = analyze_group_range(
+            decrypted_dir, chat_id, group_name, start_date, end_date,
+            wxid=wxid,
+            progress_cb=(
+                (lambda cid, gn, st, count, i=i, total=total:
+                 progress_cb(cid, gn, st, i, total, count))
+                if progress_cb else None
+            ),
+        )
+        results.append({
+            'chat_id': chat_id,
+            'group_name': group_name,
+            'status': status,
+            'msg_count': msg_count,
+            'date': label,
             'error': '' if status == 'ok' else md,
         })
         if progress_cb:

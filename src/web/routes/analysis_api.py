@@ -111,6 +111,7 @@ def run_analysis():
     data = request.get_json(silent=True) or {}
     chat_ids = data.get('chat_ids', [])
     date_range = data.get('date_range', [])
+    analysis_mode = data.get('analysis_mode') or 'range'
     if not chat_ids or len(date_range) != 2:
         _run_lock.release()
         return jsonify({'error': 'chat_ids 和 date_range 必填'}), 400
@@ -131,20 +132,30 @@ def run_analysis():
                 from engine.services.name_resolver import resolve_wxid
                 group_names[cid] = resolve_wxid(decrypted_dir, cid) or cid
 
-            current = start
             all_results = []
-            while current <= end:
-                date_str = current.strftime('%Y-%m-%d')
-                push('progress', f'分析 {date_str}...', 0.1)
-                day_results = ai_analyzer.analyze_multiple(
+            if analysis_mode == 'daily':
+                current = start
+                while current <= end:
+                    date_str = current.strftime('%Y-%m-%d')
+                    push('progress', f'分析 {date_str}...', 0.1)
+                    day_results = ai_analyzer.analyze_multiple(
+                        decrypted_dir, chat_ids, group_names,
+                        date_str, wxid=wxid,
+                        progress_cb=lambda *args: _push_analysis_progress(push, *args),
+                    )
+                    for item in day_results:
+                        item['date'] = date_str
+                    all_results.extend(day_results)
+                    current += timedelta(days=1)
+            else:
+                start_str = start.strftime('%Y-%m-%d')
+                end_str = end.strftime('%Y-%m-%d')
+                push('progress', f'分析 {start_str} ~ {end_str}...', 0.1)
+                all_results = ai_analyzer.analyze_multiple_range(
                     decrypted_dir, chat_ids, group_names,
-                    date_str, wxid=wxid,
+                    start_str, end_str, wxid=wxid,
                     progress_cb=lambda *args: _push_analysis_progress(push, *args),
                 )
-                for item in day_results:
-                    item['date'] = date_str
-                all_results.extend(day_results)
-                current += timedelta(days=1)
             ok_count = sum(1 for r in all_results if r.get('status') == 'ok')
             skip_count = sum(1 for r in all_results if r.get('status') == 'skip')
             error_count = sum(1 for r in all_results if r.get('status') == 'error')

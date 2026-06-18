@@ -16,10 +16,13 @@ if _BASE not in sys.path:
 from engine.services import knowledge_store as store
 from engine.services import knowledge_extractor as extractor
 from engine.services import knowledge_export as exporter
+from engine.services.analysis_artifact import load_artifact
 from engine.services.ai_analyzer import (
     config_path_for,
     load_tags,
     collect_tagged_chat_ids,
+    period_label,
+    storage_dir_for,
 )
 from engine.services.name_resolver import resolve_wxid
 from web.sse import create_sse_progress, sse_response
@@ -213,6 +216,33 @@ def stats_api():
 _run_lock = threading.Lock()
 
 
+def _cards_from_existing_artifact(decrypted_dir: str, chat_id: str,
+                                  label: str, min_score: int):
+    """Return cards from an existing AI analysis artifact, or None if missing."""
+    artifact = load_artifact(storage_dir_for(decrypted_dir), chat_id, label)
+    if not artifact:
+        return None
+    return extractor.cards_from_analysis_artifact(artifact, min_score=min_score)
+
+
+def _save_scan_cards(dbp: str, cards: list, chat_id: str, max_cards: int) -> int:
+    """Persist scan cards and return the saved count."""
+    saved = 0
+    for card in cards[:max_cards]:
+        for src in card.get('sources', []):
+            src['chat_id'] = chat_id
+        card['source_chat_ids'] = [chat_id]
+        store.save_card(dbp, card)
+        saved += 1
+    return saved
+
+
+def _knowledge_source_mode(data: dict) -> str:
+    """Return the scan source mode. Default is quality-first LLM extraction."""
+    value = (data or {}).get('knowledge_source') or 'llm'
+    return value if value in {'llm', 'auto', 'artifact_only'} else 'llm'
+
+
 @knowledge_bp.route('/run', methods=['POST'])
 def run_knowledge_scan():
     data = request.get_json(silent=True) or {}
@@ -221,6 +251,8 @@ def run_knowledge_scan():
     min_score = int(data.get('min_score') or 70)
     domain = data.get('domain') or 'general'
     max_cards = int(data.get('max_cards') or 30)
+    scan_mode = data.get('scan_mode') or 'range'
+    knowledge_source = _knowledge_source_mode(data)
 
     if not chat_ids:
         return jsonify({'error': '请至少选择一个群聊'}), 400
@@ -247,59 +279,112 @@ def run_knowledge_scan():
     push, gen = create_sse_progress()
 
     def _run():
-        try:
-            llm_call = extractor.make_llm_call(cfg_path)
-        except RuntimeError as e:
-            push.error(str(e))
-            _run_lock.release()
-            return
-
         run_id = store.create_run(dbp, date_range[0], date_range[1], chat_ids)
         total_msgs = 0
         total_candidates = 0
         total_cards = 0
+        reused_artifacts = 0
+        llm_call = None
+
+        def get_llm_call():
+            nonlocal llm_call
+            if llm_call is None:
+                llm_call = extractor.make_llm_call(cfg_path)
+            return llm_call
 
         try:
-            # Build date list
             from datetime import datetime, timedelta
             d0 = datetime.strptime(date_range[0], '%Y-%m-%d')
             d1 = datetime.strptime(date_range[1], '%Y-%m-%d')
-            dates = []
-            cur = d0
-            while cur <= d1:
-                dates.append(cur.strftime('%Y-%m-%d'))
-                cur += timedelta(days=1)
+            if d0 > d1:
+                d0, d1 = d1, d0
 
-            total_steps = len(chat_ids) * len(dates)
-            step = 0
+            if scan_mode == 'daily':
+                dates = []
+                cur = d0
+                while cur <= d1:
+                    dates.append(cur.strftime('%Y-%m-%d'))
+                    cur += timedelta(days=1)
 
-            for date in dates:
-                for cid in chat_ids:
-                    step += 1
+                total_steps = len(chat_ids) * len(dates)
+                step = 0
+
+                for date in dates:
+                    for cid in chat_ids:
+                        step += 1
+                        cname = chat_names.get(cid, cid)
+                        push('progress', f'扫描 {cname} ({date}) [{step}/{total_steps}]', step / max(total_steps, 1))
+
+                        if knowledge_source != 'llm':
+                            artifact_cards = _cards_from_existing_artifact(
+                                decrypted_dir, cid, date, min_score
+                            )
+                            if artifact_cards is not None:
+                                reused_artifacts += 1
+                                total_candidates += len(artifact_cards)
+                                total_cards += _save_scan_cards(dbp, artifact_cards, cid, max_cards)
+                                push('progress', f'复用 AI 分析结果 {cname} ({date}): {len(artifact_cards)} 条知识',
+                                     step / max(total_steps, 1))
+                                continue
+                            if knowledge_source == 'artifact_only':
+                                continue
+
+                        messages = extractor.load_messages_for_scan(decrypted_dir, cid, date, wxid=wxid)
+                        total_msgs += len(messages)
+
+                        if not messages:
+                            continue
+
+                        cards = extractor.extract_cards_from_messages(
+                            messages, cname, date, get_llm_call(),
+                            min_score=min_score, domain=domain,
+                        )
+                        total_candidates += len(cards)
+                        total_cards += _save_scan_cards(dbp, cards, cid, max_cards)
+
+                        push('progress', f'完成 {cname} ({date}): {len(cards)} 条知识',
+                             step / max(total_steps, 1))
+            else:
+                start_str = d0.strftime('%Y-%m-%d')
+                end_str = d1.strftime('%Y-%m-%d')
+                label = period_label(start_str, end_str)
+                total_steps = len(chat_ids)
+
+                for step, cid in enumerate(chat_ids, 1):
                     cname = chat_names.get(cid, cid)
-                    push('progress', f'扫描 {cname} ({date}) [{step}/{total_steps}]', step / max(total_steps, 1))
+                    push('progress', f'扫描 {cname} ({start_str} ~ {end_str}) [{step}/{total_steps}]',
+                         ((step - 1) / max(total_steps, 1)) * 0.8 + 0.1)
 
-                    messages = extractor.load_messages_for_scan(decrypted_dir, cid, date, wxid=wxid)
+                    if knowledge_source != 'llm':
+                        artifact_cards = _cards_from_existing_artifact(
+                            decrypted_dir, cid, label, min_score
+                        )
+                        if artifact_cards is not None:
+                            reused_artifacts += 1
+                            total_candidates += len(artifact_cards)
+                            total_cards += _save_scan_cards(dbp, artifact_cards, cid, max_cards)
+                            push('progress', f'复用 AI 分析结果 {cname} ({start_str} ~ {end_str}): {len(artifact_cards)} 条知识',
+                                 step / max(total_steps, 1))
+                            continue
+                        if knowledge_source == 'artifact_only':
+                            continue
+
+                    messages = extractor.load_messages_for_scan(
+                        decrypted_dir, cid, start_str, wxid=wxid, end_date=end_str
+                    )
                     total_msgs += len(messages)
 
                     if not messages:
                         continue
 
-                    cards = extractor.extract_cards_from_messages(
-                        messages, cname, date, llm_call,
+                    cards = extractor.extract_cards_from_messages_chunked(
+                        messages, cname, label, get_llm_call(),
                         min_score=min_score, domain=domain,
                     )
                     total_candidates += len(cards)
+                    total_cards += _save_scan_cards(dbp, cards, cid, max_cards)
 
-                    for card in cards[:max_cards]:
-                        # Attach chat_id to sources
-                        for src in card.get('sources', []):
-                            src['chat_id'] = cid
-                        card['source_chat_ids'] = [cid]
-                        store.save_card(dbp, card)
-                        total_cards += 1
-
-                    push('progress', f'完成 {cname} ({date}): {len(cards)} 条知识',
+                    push('progress', f'完成 {cname} ({start_str} ~ {end_str}): {len(cards)} 条知识',
                          step / max(total_steps, 1))
 
             store.finish_run(dbp, run_id, status='done',
@@ -311,6 +396,7 @@ def run_knowledge_scan():
                 'total_messages': total_msgs,
                 'candidate_count': total_candidates,
                 'card_count': total_cards,
+                'reused_artifacts': reused_artifacts,
             })
         except Exception as e:
             store.finish_run(dbp, run_id, status='error', error=str(e))

@@ -22,6 +22,13 @@ def test_parse_artifact_json_strips_fence():
     assert data['topics'] == []
 
 
+def test_parse_artifact_json_ignores_trailing_extra_data():
+    raw = '{"summary":"ok","topics":[]}{"extra":true}'
+    data = parse_artifact_json(raw)
+    assert data['summary'] == 'ok'
+    assert data['topics'] == []
+
+
 def test_normalize_artifact_fills_defaults():
     data = normalize_artifact(
         {'summary': '摘要'},

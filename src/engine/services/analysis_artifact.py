@@ -23,9 +23,15 @@ def extract_json_object(raw: str) -> str:
         text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
         text = re.sub(r'\s*```$', '', text)
     start = text.find('{')
-    end = text.rfind('}')
-    if start >= 0 and end > start:
-        return text[start:end + 1]
+    if start >= 0:
+        text = text[start:]
+        try:
+            _, end = json.JSONDecoder().raw_decode(text)
+            return text[:end]
+        except json.JSONDecodeError:
+            end = text.rfind('}')
+            if end > 0:
+                return text[:end + 1]
     return text
 
 
