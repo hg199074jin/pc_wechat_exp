@@ -469,6 +469,80 @@ def export_cards_api():
 
 
 # ---------------------------------------------------------------------------
+# Obsidian vault sync
+# ---------------------------------------------------------------------------
+
+def _safe_path(path: str) -> str:
+    """Normalise a user-supplied path to prevent traversal outside its root."""
+    return os.path.realpath(os.path.abspath(path or ''))
+
+
+@knowledge_bp.route('/obsidian-config', methods=['GET', 'PUT'])
+def obsidian_config_api():
+    """Read or write the Obsidian vault path used for knowledge export."""
+    from engine.config_file import (
+        get_obsidian_vault_path,
+        set_obsidian_vault_path,
+    )
+    if request.method == 'GET':
+        return jsonify({'vault_path': get_obsidian_vault_path() or ''})
+
+    data = request.get_json(silent=True) or {}
+    raw = str(data.get('vault_path') or '').strip()
+    if raw:
+        path = _safe_path(raw)
+        if not os.path.isdir(path):
+            return jsonify({'error': f'目录不存在: {path}'}), 400
+        set_obsidian_vault_path(path)
+    else:
+        set_obsidian_vault_path('')  # clear
+    return jsonify({'vault_path': get_obsidian_vault_path() or ''})
+
+
+def _collect_cards_for_obsidian_sync() -> list:
+    """Collect full cards (with sources) for an Obsidian sync.
+
+    Reuses the listing filters, then re-fetches each card via get_card so the
+    per-message ``sources`` (needed for [[group]] wikilinks) are attached —
+    list_cards strips them for performance.
+    """
+    result = _list_cards_for_request(force_large=True)
+    cards = result.get('cards') or []
+    full = []
+    for card in cards:
+        complete = store.get_card(_db_path(), card.get('id') or '')
+        if complete:
+            full.append(complete)
+        else:
+            full.append(card)  # fall back to the listed record (no sources)
+    for card in full:
+        _clean_card_sources(card)
+    return full
+
+
+@knowledge_bp.route('/sync-obsidian', methods=['POST'])
+def sync_obsidian_api():
+    """Sync knowledge cards into the configured Obsidian vault (incremental)."""
+    from engine.config_file import get_obsidian_vault_path
+    from engine.services.obsidian_export import sync_cards_to_vault
+
+    vault_path = get_obsidian_vault_path()
+    if not vault_path:
+        return jsonify({'error': '请先配置 Obsidian vault 路径'}), 400
+
+    cards = _collect_cards_for_obsidian_sync()
+    decrypted_dir = current_app.config.get('DECRYPTED_DIR', '')
+    result = sync_cards_to_vault(cards, vault_path, decrypted_dir=decrypted_dir)
+    return jsonify({
+        'vault_path': vault_path,
+        'card_count': len(cards),
+        'written': result.get('written', 0),
+        'skipped': result.get('skipped', 0),
+        'errors': result.get('errors') or [],
+    })
+
+
+# ---------------------------------------------------------------------------
 # Schedule CRUD
 # ---------------------------------------------------------------------------
 

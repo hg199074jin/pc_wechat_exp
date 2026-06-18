@@ -145,9 +145,48 @@ def _run_for_job(job: dict, config_path: str, decrypted_dir: str) -> None:
         store.finish_run(dbp, run_id, status='done',
                          total_messages=total_msgs, card_count=total_cards)
         print(f"[知识雷达] 完成: {total_cards} 条知识卡片 (来自 {total_msgs} 条消息)")
+
+        # Best-effort Obsidian sync after a scan (new cards just landed).
+        _sync_obsidian_safely(decrypted_dir)
     except Exception as e:
         store.finish_run(dbp, run_id, status='error', error=str(e))
         print(f"[知识雷达] 扫描失败: {e}")
+
+
+def run_obsidian_sync(decrypted_dir: str) -> dict:
+    """Pull all knowledge cards and sync them into the configured Obsidian vault.
+
+    Returns the sync result dict (written/skipped/errors). No-op (returns zeros)
+    when the vault path is not configured.
+    """
+    from engine.config_file import get_obsidian_vault_path
+    from engine.services.obsidian_export import sync_cards_to_vault
+
+    vault_path = get_obsidian_vault_path()
+    if not vault_path:
+        return {'written': 0, 'skipped': 0, 'errors': [], 'skipped_no_vault': True}
+
+    from engine.services import knowledge_store as store
+    dbp = store.knowledge_db_path(decrypted_dir)
+    # Fetch full cards (with sources) for [[group]] wikilinks.
+    listing = store.list_cards(dbp, limit=5000)
+    cards = []
+    for slim in listing.get('cards') or []:
+        complete = store.get_card(dbp, slim.get('id') or '')
+        cards.append(complete or slim)
+    return sync_cards_to_vault(cards, vault_path, decrypted_dir=decrypted_dir)
+
+
+def _sync_obsidian_safely(decrypted_dir: str) -> None:
+    """Run an Obsidian sync, swallowing errors so a scan job never fails late."""
+    try:
+        result = run_obsidian_sync(decrypted_dir)
+        if result.get('skipped_no_vault'):
+            return
+        print(f"[知识雷达] Obsidian 同步: 写入 {result.get('written', 0)}，"
+              f"跳过 {result.get('skipped', 0)}")
+    except Exception as e:
+        print(f"[知识雷达] Obsidian 同步失败: {e}")
 
 
 def _resolve_tag_paths(tags: list, tag_paths: list, chat_ids: list) -> None:

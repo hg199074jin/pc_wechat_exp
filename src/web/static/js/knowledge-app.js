@@ -56,6 +56,11 @@ const KnowledgeApp = {
     document.getElementById('btn-export-md').onclick = () => this.exportCards('md');
     document.getElementById('btn-export-docx').onclick = () => this.exportCards('docx');
 
+    // Obsidian sync
+    document.getElementById('btn-sync-obsidian').onclick = () => this.syncToObsidian();
+    document.getElementById('btn-obsidian-path').onclick = () => this.configureObsidianPath();
+    this.loadObsidianConfig();
+
     // Bulk
     document.getElementById('btn-bulk-select').onclick = () => this.toggleBulkSelect();
     document.getElementById('btn-bulk-archive').onclick = () => this.bulkAction('archived');
@@ -534,6 +539,101 @@ const KnowledgeApp = {
     if (minScore) params.set('min_score', minScore);
     if (tagPath) params.set('tag_path', tagPath);
     window.open('/api/knowledge/export?' + params.toString(), '_blank');
+  },
+
+  // -----------------------------------------------------------------------
+  // Obsidian sync
+  // -----------------------------------------------------------------------
+
+  async loadObsidianConfig() {
+    const info = document.getElementById('obsidian-vault-info');
+    const syncBtn = document.getElementById('btn-sync-obsidian');
+    if (!info) return;
+    try {
+      const r = await fetch('/api/knowledge/obsidian-config');
+      const data = await r.json();
+      const path = data.vault_path || '';
+      this._obsidianVaultPath = path;
+      if (path) {
+        info.textContent = '📁 ' + path;
+        info.style.color = '#7ee787';
+        if (syncBtn) syncBtn.disabled = false;
+      } else {
+        info.textContent = '未配置 Obsidian vault 路径';
+        info.style.color = '#8b949e';
+        if (syncBtn) syncBtn.disabled = false;
+      }
+    } catch (e) {
+      info.textContent = '加载配置失败';
+    }
+  },
+
+  async configureObsidianPath() {
+    const current = this._obsidianVaultPath || '';
+    const input = prompt('请输入 Obsidian vault 的本地绝对路径（例如 D:\\\\Obsidian\\\\MyVault）：', current);
+    if (input === null) return; // user cancelled
+    const path = String(input).trim();
+    const resultEl = document.getElementById('obsidian-sync-result');
+    try {
+      const r = await fetch('/api/knowledge/obsidian-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vault_path: path }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        alert('保存失败: ' + (data.error || '未知错误'));
+        return;
+      }
+      await this.loadObsidianConfig();
+      if (resultEl) resultEl.textContent = path ? '✓ 路径已保存' : '✓ 已清除路径';
+    } catch (e) {
+      alert('保存失败: ' + e.message);
+    }
+  },
+
+  async syncToObsidian() {
+    if (!this._obsidianVaultPath) {
+      alert('请先点击「⚙ 设置路径」配置 Obsidian vault 路径');
+      return;
+    }
+    const resultEl = document.getElementById('obsidian-sync-result');
+    const btn = document.getElementById('btn-sync-obsidian');
+    if (resultEl) resultEl.textContent = '⏳ 同步中...';
+    if (btn) btn.disabled = true;
+
+    // Mirror the current list filters so the sync scope matches what the user
+    // sees (status/type/tag_path/q/min_score).
+    const params = new URLSearchParams();
+    const activeLi = document.querySelector('#status-nav li.active');
+    const status = activeLi ? activeLi.dataset.status : '';
+    const type = document.getElementById('filter-type').value;
+    const tagPath = document.getElementById('filter-tag-path')?.value || '';
+    const q = document.getElementById('knowledge-search').value.trim();
+    const minScore = document.getElementById('filter-min-score').value;
+    if (status) params.set('status', status);
+    if (type) params.set('type', type);
+    if (tagPath) params.set('tag_path', tagPath);
+    if (q) params.set('q', q);
+    if (minScore) params.set('min_score', minScore);
+
+    try {
+      const r = await fetch('/api/knowledge/sync-obsidian?' + params.toString(), { method: 'POST' });
+      const data = await r.json();
+      if (!r.ok) {
+        if (resultEl) resultEl.textContent = '✗ ' + (data.error || '同步失败');
+        alert(data.error || '同步失败');
+        return;
+      }
+      const errs = data.errors && data.errors.length ? `，${data.errors.length} 个错误` : '';
+      if (resultEl) {
+        resultEl.innerHTML = `✓ 同步完成：写入 <b>${data.written}</b>，跳过 <b>${data.skipped}</b>${errs}`;
+      }
+    } catch (e) {
+      if (resultEl) resultEl.textContent = '✗ 同步失败: ' + e.message;
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   },
 
   // -----------------------------------------------------------------------

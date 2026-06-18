@@ -49,6 +49,19 @@ def set_default_backup_root(path: str) -> None:
     _write_config(cfg)
 
 
+def get_obsidian_vault_path() -> str | None:
+    """Return the configured Obsidian vault path for knowledge export, if any."""
+    raw = _read_config().get("obsidian_vault_path", "")
+    return str(raw) if raw else None
+
+
+def set_obsidian_vault_path(path: str) -> None:
+    """Persist the Obsidian vault path in the ignored local config."""
+    cfg = _read_config()
+    cfg["obsidian_vault_path"] = str(path or "")
+    _write_config(cfg)
+
+
 def get_llm_config() -> dict:
     """Return private LLM config from the ignored local config."""
     llm = _read_config().get("llm", {})
