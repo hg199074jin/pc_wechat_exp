@@ -665,7 +665,7 @@ def _preprocess_llm_json(raw: str) -> str:
     commas that LLMs frequently emit but strict JSON rejects. Does not attempt
     to fix structural problems — those are left to the repair step.
     """
-    text = raw or ''
+    text = _strip_reasoning_blocks(raw)
     # Strip /* block comments */.
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
     # Strip // line comments (only when not inside a string — cheap heuristic:
@@ -675,6 +675,22 @@ def _preprocess_llm_json(raw: str) -> str:
     # Remove trailing commas before } or ].
     text = re.sub(r',\s*([}\]])', r'\1', text)
     return text
+
+
+def _strip_reasoning_blocks(raw: str) -> str:
+    """Remove model reasoning wrappers while preserving any final answer."""
+    text = raw or ''
+    text = re.sub(r'<think>.*?</think>\s*', '', text,
+                  flags=re.IGNORECASE | re.DOTALL)
+    return text.strip()
+
+
+def _is_reasoning_only_response(raw: str) -> bool:
+    """Return whether a model responded with thought text but no final JSON."""
+    text = (raw or '').strip()
+    if not re.search(r'<think>', text, flags=re.IGNORECASE):
+        return False
+    return not _strip_reasoning_blocks(text)
 
 
 def _parse_artifact_json_with_repair(raw: str, cfg: dict,
@@ -719,6 +735,16 @@ def _parse_artifact_json_with_repair(raw: str, cfg: dict,
                 proxy=cfg.get('proxy', 'auto'),
             )
             repaired = _preprocess_llm_json(repaired_raw)
+            if _is_reasoning_only_response(repaired_raw):
+                repair_error = ValueError('LLM 修复响应仅包含推理文本，未返回 JSON')
+                repair_rounds.append({
+                    'attempt': attempt + 1,
+                    'error': _json_error_snapshot(repair_error, repaired),
+                    'raw_output': repaired_raw,
+                    'preprocessed_output': repaired,
+                })
+                error = repair_error
+                break
             try:
                 return parse_artifact_json(repaired)
             except Exception as repair_error:
@@ -737,6 +763,191 @@ def _parse_artifact_json_with_repair(raw: str, cfg: dict,
         )
         suffix = f'；调试文件: {debug_path}' if debug_path else ''
         raise ValueError(f'{first_error}; 修复 {max_repairs} 次后仍失败: {error}{suffix}')
+
+
+def _merge_key(value: str) -> str:
+    """Build a stable key for deterministic rollup de-duplication."""
+    return re.sub(r'\s+', '', str(value or '')).casefold()
+
+
+def _unique_values(values: list) -> list:
+    result = []
+    seen = set()
+    for value in values or []:
+        text = str(value or '').strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+def _candidate_score(candidate: dict) -> int:
+    try:
+        return int((candidate or {}).get('score') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _merge_partial_artifacts(partial_artifacts: list, stats: dict) -> dict:
+    """Merge parsed chunk artifacts without another structured LLM response."""
+    topic_map = {}
+    topic_order = []
+    followup_map = {}
+    followup_order = []
+    summaries = []
+
+    for partial in partial_artifacts or []:
+        summary = str((partial or {}).get('summary') or '').strip()
+        if summary and summary not in summaries:
+            summaries.append(summary)
+
+        for source_topic in (partial or {}).get('topics') or []:
+            title = str(source_topic.get('title') or '未命名话题').strip()
+            key = _merge_key(title) or f'topic_{len(topic_order) + 1}'
+            if key not in topic_map:
+                topic_map[key] = {
+                    'id': source_topic.get('id') or f'topic_{len(topic_order) + 1}',
+                    'title': title,
+                    'summary_parts': [],
+                    'participants': [],
+                    'evidence': [],
+                    'knowledge_candidates': [],
+                }
+                topic_order.append(key)
+            target = topic_map[key]
+            topic_summary = str(source_topic.get('summary') or '').strip()
+            if topic_summary and topic_summary not in target['summary_parts']:
+                target['summary_parts'].append(topic_summary)
+            target['participants'] = _unique_values(
+                target['participants'] + list(source_topic.get('participants') or [])
+            )
+
+            evidence_keys = {
+                (item.get('msg_id'), item.get('sender'), item.get('time'), item.get('quote'))
+                for item in target['evidence']
+            }
+            for evidence in source_topic.get('evidence') or []:
+                item = dict(evidence or {})
+                item_key = (item.get('msg_id'), item.get('sender'), item.get('time'), item.get('quote'))
+                if item_key not in evidence_keys:
+                    target['evidence'].append(item)
+                    evidence_keys.add(item_key)
+
+            candidate_index = {
+                _merge_key(item.get('title') or item.get('summary')): idx
+                for idx, item in enumerate(target['knowledge_candidates'])
+            }
+            for candidate in source_topic.get('knowledge_candidates') or []:
+                incoming = dict(candidate or {})
+                candidate_key = _merge_key(incoming.get('title') or incoming.get('summary'))
+                if not candidate_key:
+                    candidate_key = f'candidate_{len(target["knowledge_candidates"])}'
+                existing_idx = candidate_index.get(candidate_key)
+                if existing_idx is None:
+                    incoming['tags'] = _unique_values(incoming.get('tags') or [])
+                    incoming['source_msg_ids'] = list(dict.fromkeys(incoming.get('source_msg_ids') or []))
+                    target['knowledge_candidates'].append(incoming)
+                    candidate_index[candidate_key] = len(target['knowledge_candidates']) - 1
+                    continue
+                existing = target['knowledge_candidates'][existing_idx]
+                winner = incoming if _candidate_score(incoming) > _candidate_score(existing) else existing
+                winner = dict(winner)
+                winner['tags'] = _unique_values(
+                    list(existing.get('tags') or []) + list(incoming.get('tags') or [])
+                )
+                winner['source_msg_ids'] = list(dict.fromkeys(
+                    list(existing.get('source_msg_ids') or []) + list(incoming.get('source_msg_ids') or [])
+                ))
+                target['knowledge_candidates'][existing_idx] = winner
+
+        for source_followup in (partial or {}).get('followups') or []:
+            title = str(source_followup.get('title') or '').strip()
+            if not title:
+                continue
+            key = _merge_key(title)
+            if key not in followup_map:
+                followup_map[key] = {
+                    'title': title,
+                    'owner': source_followup.get('owner') or '',
+                    'evidence_msg_ids': list(source_followup.get('evidence_msg_ids') or []),
+                }
+                followup_order.append(key)
+            else:
+                target = followup_map[key]
+                if not target['owner'] and source_followup.get('owner'):
+                    target['owner'] = source_followup.get('owner')
+                target['evidence_msg_ids'] = list(dict.fromkeys(
+                    target['evidence_msg_ids'] + list(source_followup.get('evidence_msg_ids') or [])
+                ))
+
+    topics = []
+    for key in topic_order:
+        topic = topic_map[key]
+        topic['summary'] = '；'.join(topic.pop('summary_parts'))
+        topics.append(topic)
+    return {
+        'summary': '；'.join(summaries[:6]),
+        'topics': topics,
+        'followups': [followup_map[key] for key in followup_order],
+        'stats': {**(stats or {}), 'rollup_mode': 'deterministic'},
+    }
+
+
+def _compact_artifact_for_polish(artifact: dict) -> dict:
+    """Limit fallback polish input without discarding source-backed outcomes."""
+    topics = []
+    for topic in (artifact.get('topics') or [])[:12]:
+        topics.append({
+            'title': topic.get('title') or '',
+            'summary': topic.get('summary') or '',
+            'participants': list(topic.get('participants') or [])[:8],
+            'evidence': list(topic.get('evidence') or [])[:2],
+            'knowledge_candidates': list(topic.get('knowledge_candidates') or [])[:3],
+        })
+    return {
+        'summary': artifact.get('summary') or '',
+        'topics': topics,
+        'followups': list(artifact.get('followups') or [])[:12],
+    }
+
+
+def _render_artifact_markdown(artifact: dict, group_name: str, date: str,
+                              cfg: dict) -> str:
+    """Render a report, with a Markdown-only polish pass for fallback rollups."""
+    render_artifact = dict(artifact or {})
+    render_artifact.setdefault('group_name', group_name)
+    render_artifact.setdefault('date', date)
+    fallback = sanitize_analysis_markdown(render_markdown_report(render_artifact), group_name)
+    if (artifact.get('stats') or {}).get('rollup_mode') != 'deterministic':
+        return fallback
+
+    compact = _compact_artifact_for_polish(artifact)
+    system = """你是专业的群聊分析报告编辑。请把已完成结构合并的群聊分析，整理成最终中文 Markdown 报告。
+
+硬性要求：
+1. 只输出最终 Markdown 报告，不输出思考、解释、JSON、代码块或英文元话语。
+2. 必须从“# 群聊分析报告：”开始，包含“## 总体摘要”“## 关键话题”“## 待跟进事项”。
+3. 只能使用输入中已有的事实、话题、证据和待跟进事项，不得编造。
+4. 合并重复表达，按重要性排序，保持简洁、可读。
+"""
+    user = (
+        f'群聊名称: {group_name}\n日期: {date}\n\n'
+        f'已完成结构合并的分析数据:\n{_json.dumps(compact, ensure_ascii=False)}'
+    )
+    try:
+        raw = call_llm(
+            system=system, user=user,
+            base_url=cfg['base_url'], api_key=cfg['api_key'], model=cfg['model'],
+            temperature=cfg.get('temperature', 0.2),
+            max_tokens=min(int(cfg.get('max_tokens') or 4096), 6000),
+            timeout=_llm_timeout(cfg), proxy=cfg.get('proxy', 'auto'),
+        )
+        polished = sanitize_analysis_markdown(_strip_reasoning_blocks(raw), group_name)
+        if polished.startswith('#') and ('总体摘要' in polished or '关键话题' in polished):
+            return polished
+    except Exception:
+        pass
+    return fallback
 
 
 def _rollup_artifacts(group_name: str, date: str, stats: dict,
@@ -778,7 +989,7 @@ def _rollup_artifacts(group_name: str, date: str, stats: dict,
     try:
         return _parse_artifact_json_with_repair(raw, cfg, debug_context=debug_context)
     except Exception as e:
-        raise ValueError(f'LLM 输出不是合法 JSON: {e}')
+        return _merge_partial_artifacts(partial_artifacts, stats)
 
 
 def analyze_group(decrypted_dir: str, chat_id: str, group_name: str,
@@ -869,8 +1080,7 @@ def analyze_group(decrypted_dir: str, chat_id: str, group_name: str,
             for topic in artifact.get('topics') or []
         )
         progress_cb(chat_id, group_name, 'rendering_report', candidates_count)
-    markdown = render_markdown_report(artifact)
-    markdown = sanitize_analysis_markdown(markdown, group_name)
+    markdown = _render_artifact_markdown(artifact, group_name, date, cfg)
 
     out = result_path(storage_dir_for(decrypted_dir), chat_id, date)
     try:
@@ -968,8 +1178,7 @@ def analyze_group_range(decrypted_dir: str, chat_id: str, group_name: str,
             for topic in artifact.get('topics') or []
         )
         progress_cb(chat_id, group_name, 'rendering_report', candidates_count)
-    markdown = render_markdown_report(artifact)
-    markdown = sanitize_analysis_markdown(markdown, group_name)
+    markdown = _render_artifact_markdown(artifact, group_name, label, cfg)
 
     out = result_path(storage_dir_for(decrypted_dir), chat_id, label)
     try:

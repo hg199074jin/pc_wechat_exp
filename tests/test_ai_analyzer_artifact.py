@@ -177,6 +177,12 @@ def test_preprocess_llm_json_strips_comments_and_trailing_commas():
     assert 'x' not in _preprocess_llm_json('{"a": /* x */ 1}')
 
 
+def test_preprocess_llm_json_strips_reasoning_block_before_json():
+    from engine.services.ai_analyzer import _preprocess_llm_json
+    raw = '<think>先分析格式</think>\n{"summary":"ok","topics":[]}'
+    assert _preprocess_llm_json(raw) == '{"summary":"ok","topics":[]}'
+
+
 def test_preprocess_llm_json_recovers_via_parse():
     """Trailing-comma cleanup should let parse_artifact_json succeed."""
     from engine.services.ai_analyzer import _preprocess_llm_json, parse_artifact_json
@@ -211,6 +217,107 @@ def test_repair_exhausts_rounds_and_raises():
         except ValueError as e:
             assert '修复' in str(e)
     assert mock_call.call_count == 2
+
+
+def test_repair_stops_when_model_returns_reasoning_without_json():
+    """A reasoning-only repair must not be fed into another repair request."""
+    from engine.services.ai_analyzer import _parse_artifact_json_with_repair
+    cfg = {'base_url': 'u', 'api_key': 'k', 'model': 'm'}
+    with patch('engine.services.ai_analyzer.call_llm',
+               return_value='<think>我来修复 JSON</think>') as mock_call:
+        try:
+            _parse_artifact_json_with_repair('{broken', cfg)
+            raise AssertionError('expected ValueError')
+        except ValueError as e:
+            assert '仅包含推理文本' in str(e)
+    assert mock_call.call_count == 1
+
+
+def test_rollup_falls_back_to_deterministic_merge_when_json_repair_fails():
+    """Valid chunk artifacts remain usable even when LLM rollup JSON fails."""
+    partials = [
+        {
+            'summary': '第一块讨论 SOP。',
+            'topics': [{
+                'title': 'SOP',
+                'summary': '第一块的流程讨论。',
+                'participants': ['甲'],
+                'evidence': [{'msg_id': 1, 'sender': '甲', 'quote': '先做流程'}],
+                'knowledge_candidates': [{
+                    'title': '流程 SOP', 'score': 'invalid', 'tags': ['流程'],
+                    'source_msg_ids': [1],
+                }],
+            }],
+            'followups': [{'title': '整理流程', 'evidence_msg_ids': [1]}],
+        },
+        {
+            'summary': '第二块补充 SOP。',
+            'topics': [{
+                'title': 'SOP',
+                'summary': '第二块的补充讨论。',
+                'participants': ['乙'],
+                'evidence': [{'msg_id': 2, 'sender': '乙', 'quote': '补充检查'}],
+                'knowledge_candidates': [{
+                    'title': '流程 SOP', 'score': 92, 'tags': ['审计'],
+                    'source_msg_ids': [2],
+                }],
+            }],
+            'followups': [{'title': '整理流程', 'evidence_msg_ids': [2]}],
+        },
+    ]
+    cfg = {'base_url': 'u', 'api_key': 'k', 'model': 'm'}
+    with patch('engine.services.ai_analyzer.call_llm',
+               side_effect=['{broken', '<think>只输出了推理</think>']):
+        result = ai_analyzer._rollup_artifacts(
+            '测试群', '2026-06-15', {'message_count': 2}, partials, '', cfg
+        )
+    assert result['stats']['rollup_mode'] == 'deterministic'
+    assert len(result['topics']) == 1
+    topic = result['topics'][0]
+    assert topic['participants'] == ['甲', '乙']
+    assert [item['msg_id'] for item in topic['evidence']] == [1, 2]
+    assert topic['knowledge_candidates'][0]['score'] == 92
+    assert topic['knowledge_candidates'][0]['tags'] == ['流程', '审计']
+    assert result['followups'][0]['evidence_msg_ids'] == [1, 2]
+
+
+def test_rollup_fallback_uses_markdown_polish_when_available():
+    """Fallback keeps a final LLM prose pass without requiring JSON output."""
+    artifact = {
+        'summary': '结构化摘要',
+        'topics': [],
+        'stats': {'rollup_mode': 'deterministic'},
+    }
+    cfg = {'base_url': 'u', 'api_key': 'k', 'model': 'm'}
+    with patch('engine.services.ai_analyzer.call_llm',
+               return_value='# 群聊分析报告：测试群\n\n## 总体摘要\n润色后的总结'):
+        markdown = ai_analyzer._render_artifact_markdown(
+            artifact, '测试群', '2026-06-15', cfg
+        )
+    assert '润色后的总结' in markdown
+
+
+def test_rollup_fallback_uses_structured_report_when_polish_is_invalid():
+    artifact = {
+        'summary': '结构化摘要',
+        'topics': [{
+            'title': 'SOP',
+            'summary': '流程讨论。',
+            'participants': ['甲'],
+            'evidence': [],
+            'knowledge_candidates': [],
+        }],
+        'followups': [],
+        'stats': {'rollup_mode': 'deterministic'},
+    }
+    cfg = {'base_url': 'u', 'api_key': 'k', 'model': 'm'}
+    with patch('engine.services.ai_analyzer.call_llm',
+               return_value='<think>没有最终回答</think>'):
+        markdown = ai_analyzer._render_artifact_markdown(
+            artifact, '测试群', '2026-06-15', cfg
+        )
+    assert markdown.startswith('# 群聊分析报告：测试群')
+    assert 'SOP' in markdown
 
 
 def test_repair_failure_writes_debug_file():
