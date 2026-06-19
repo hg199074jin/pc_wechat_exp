@@ -11,6 +11,7 @@ from engine.services.knowledge_extractor import (
     extract_cards_from_messages, build_convert_prompt, _extract_json_object,
     make_llm_call, readable_message_text, load_messages_for_scan,
     extract_cards_from_messages_chunked, dedupe_knowledge_cards,
+    build_my_version_prompt, build_agent_rule_prompt, parse_agent_rule_draft,
 )
 
 
@@ -316,3 +317,69 @@ def test_chunked_extraction_keeps_successful_chunks_when_one_chunk_has_bad_json(
     )
     assert [card['title'] for card in cards] == ['后续分块知识']
     assert errors
+
+
+# ---------------------------------------------------------------------------
+# My-version derivative + agent-rule draft (Task 3)
+# ---------------------------------------------------------------------------
+
+def _sample_card():
+    return {
+        'title': 'Codex 子任务拆分',
+        'type': 'methodology',
+        'summary': '把大任务拆成子任务并行执行更稳',
+        'why_valuable': '减少单次上下文，避免遗漏',
+        'content_md': '正文：拆分原则…',
+        'tags': ['AI', '编程'],
+        'sources': [{'chat_name': 'AI提效群', 'sender': '张三', 'quote': '拆分更稳'}],
+    }
+
+
+def test_build_my_version_prompt_contains_required_headings():
+    system, user = build_my_version_prompt(_sample_card())
+    # All seven required Markdown sections must be requested.
+    for heading in ['原始观点', '对我的启发', '适用场景', '我的理解',
+                    '可执行动作', '可复用', '是否建议长期保留']:
+        assert heading in system or heading in user
+    # Evidence is cited.
+    assert '张三' in user or 'AI提效群' in user
+    assert '不编造' in system or '不要编造' in system
+
+
+def test_build_agent_rule_prompt_requests_executable_rule():
+    card = _sample_card()
+    system, user = build_agent_rule_prompt(card, derivative=None)
+    assert '规则' in system
+    assert 'Codex 子任务拆分' in user
+    # Must demand concrete directives, not generic advice.
+    assert '具体' in system or '可执行' in system
+
+
+def test_parse_agent_rule_draft_valid():
+    raw = json.dumps({
+        'title': '拆分大任务为子任务',
+        'category': 'engineering',
+        'content_md': '当一个任务涉及超过3个文件时，先拆成子任务。',
+    })
+    rule = parse_agent_rule_draft(raw)
+    assert rule['title'] == '拆分大任务为子任务'
+    assert rule['category'] == 'engineering'
+    assert rule['content_md'].startswith('当一个任务')
+
+
+def test_parse_agent_rule_draft_unknown_category_normalizes():
+    raw = json.dumps({'title': 't', 'category': 'mystery', 'content_md': 'c'})
+    rule = parse_agent_rule_draft(raw)
+    assert rule['category'] == 'general'
+
+
+def test_parse_agent_rule_draft_missing_content_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        parse_agent_rule_draft(json.dumps({'title': 't', 'category': 'general'}))
+
+
+def test_parse_agent_rule_draft_invalid_json_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        parse_agent_rule_draft('not json at all {{')

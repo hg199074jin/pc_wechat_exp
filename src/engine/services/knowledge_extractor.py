@@ -217,6 +217,128 @@ def build_convert_prompt(card: dict, target_type: str) -> Tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# My-version derivative + agent-rule draft prompts (Task 3)
+# ---------------------------------------------------------------------------
+
+# Categories accepted for an agent-rule draft; unknown values normalize to general.
+RULE_CATEGORIES = {'engineering', 'audit', 'workflow', 'writing', 'ai_usage', 'general'}
+
+
+def _card_sources_text(card: dict) -> str:
+    """Render a card's source evidence as bullet lines for prompt context."""
+    lines = []
+    for src in (card.get('sources') or []):
+        lines.append(
+            f"- [{src.get('chat_name', '')}] {src.get('sender', '')}: {src.get('quote', '')}"
+        )
+    return '\n'.join(lines) or '（无来源引用）'
+
+
+def build_my_version_prompt(card: dict) -> Tuple[str, str]:
+    """Build prompts that turn a card into a personal-interpretation derivative.
+
+    The LLM must output Markdown with seven fixed sections (original viewpoint,
+    inspiration, scenarios, my understanding, executable actions, reusable
+    prompt/rule/template, retention recommendation). It must cite evidence,
+    avoid inventing facts, and flag uncertainty when evidence is incomplete.
+    """
+    system = """你是个人知识转化助手。把一条知识卡片转化成"我的版本"——不是复述，而是
+结合我的视角的再理解。
+
+硬性要求：
+1. 只输出 Markdown 正文，不要 JSON，不要解释，不要前后缀。
+2. 必须包含以下七节，标题逐字一致：
+## 原始观点
+## 对我的启发
+## 适用场景
+## 我的理解
+## 可执行动作
+## 可复用 Prompt、规则或模板
+## 是否建议长期保留
+3. 不要编造原文没有的信息；引用必须来自给定的来源。
+4. 证据不充分时，在"我的理解"里明确标注不确定的部分，不要强行下结论。
+5. "可执行动作"必须是具体、可立即执行的步骤，不要空泛建议。
+6. "可复用 Prompt、规则或模板"如无则写"暂无"，不要硬编。"""
+
+    user = f"""知识卡片:
+标题: {card.get('title', '')}
+类型: {card.get('type', '')}
+摘要: {card.get('summary', '')}
+价值: {card.get('why_valuable', '')}
+正文:
+{card.get('content_md', '')}
+标签: {', '.join(card.get('tags', []))}
+来源引用:
+{_card_sources_text(card)}
+
+请输出"我的版本"。"""
+    return system, user
+
+
+def build_agent_rule_prompt(card: dict, derivative: dict = None) -> Tuple[str, str]:
+    """Build prompts that draft a concise, executable agent rule.
+
+    The LLM returns a draft only; it cannot publish rules. Output is JSON with
+    title/category/content_md. Categories are normalized later by the parser.
+    """
+    system = """你是 AI 编程助手规则起草器。基于一条知识卡片（及其"我的版本"），
+起草一条简洁、可执行的 AI 工作规则草案。
+
+硬性要求：
+1. 只输出 JSON，不要 Markdown，不要解释，不要 ``` 包裹。
+2. JSON 结构：{"title": "...", "category": "...", "content_md": "..."}
+3. title 简短明确，一句话能说清这条规则。
+4. category 取值：engineering（工程/编码）、audit（审计/财税）、
+   workflow（工作流/流程）、writing（写作/文档）、ai_usage（AI 工具用法）、
+   general（通用）。不确定归 general。
+5. content_md 必须是具体的、可执行的指令，而不是空泛建议。
+   要写明"应该做什么""不要做什么"，必要时给正面/反面示例。
+6. 如果知识不适用于作为长期规则，title 写"不建议作为规则"，content_md 说明原因。
+7. 不要编造知识卡片里没有的事实。"""
+
+    deriv_text = ''
+    if derivative and derivative.get('content_md'):
+        deriv_text = f"""\n"我的版本"参考:
+{derivative.get('content_md', '')}
+"""
+
+    user = f"""知识卡片:
+标题: {card.get('title', '')}
+摘要: {card.get('summary', '')}
+正文:
+{card.get('content_md', '')}{deriv_text}
+来源引用:
+{_card_sources_text(card)}
+
+请起草一条 AI 工作规则草案（JSON）。"""
+    return system, user
+
+
+def parse_agent_rule_draft(raw: str) -> dict:
+    """Parse an LLM agent-rule draft into {title, category, content_md}.
+
+    Reuses _extract_json_object before json.loads. Unknown categories
+    normalize to 'general'. Raises ValueError if title or content_md is empty.
+    """
+    import json as _json
+    text = _extract_json_object(raw)
+    try:
+        data = _json.loads(text)
+    except _json.JSONDecodeError as e:
+        raise ValueError(f'规则草案不是合法 JSON: {e}')
+    if not isinstance(data, dict):
+        raise ValueError('规则草案必须是 JSON 对象')
+    title = (data.get('title') or '').strip()
+    content_md = (data.get('content_md') or '').strip()
+    if not title or not content_md:
+        raise ValueError('规则草案的 title 和 content_md 不能为空')
+    category = (data.get('category') or 'general').strip()
+    if category not in RULE_CATEGORIES:
+        category = 'general'
+    return {'title': title, 'category': category, 'content_md': content_md}
+
+
+# ---------------------------------------------------------------------------
 # Message formatting
 # ---------------------------------------------------------------------------
 
