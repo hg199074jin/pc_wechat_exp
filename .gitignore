@@ -14,6 +14,7 @@ claude_wechat.bat
 start_claude.bat
 todo.txt
 .superpowers/
+.worktrees/
 docs/
 export/
 output/
