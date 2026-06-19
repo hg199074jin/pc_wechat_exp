@@ -61,6 +61,11 @@ const KnowledgeApp = {
     document.getElementById('btn-obsidian-path').onclick = () => this.configureObsidianPath();
     this.loadObsidianConfig();
 
+    // Agent rules
+    const syncRulesBtn = document.getElementById('btn-sync-agent-rules');
+    if (syncRulesBtn) syncRulesBtn.onclick = () => this.syncAgentRules();
+    this.loadAgentRuleStats();
+
     // Bulk
     document.getElementById('btn-bulk-select').onclick = () => this.toggleBulkSelect();
     document.getElementById('btn-bulk-archive').onclick = () => this.bulkAction('archived');
@@ -309,12 +314,14 @@ const KnowledgeApp = {
         body: JSON.stringify({ target_type: targetType }),
       });
       const data = await r.json();
-      if (data.error) {
-        alert('转化失败: ' + data.error);
-      } else {
-        alert('已转化为 ' + (typeLabels[targetType] || targetType));
-        this.loadCards();
+      if (!r.ok) {
+        alert('转化失败: ' + (data.error || ''));
+        return;
       }
+      // Conversion now creates a derivative; the original card is unchanged.
+      alert('已生成 ' + (typeLabels[targetType] || targetType) + ' 转化（原卡内容保留不变）');
+      if (this._detailCardId === cardId) this.showDetail(cardId);
+      this.loadCards();
     } catch (e) {
       alert('转化失败: ' + e.message);
     }
@@ -325,20 +332,38 @@ const KnowledgeApp = {
   // -----------------------------------------------------------------------
 
   async showDetail(cardId) {
+    this._detailCardId = cardId;
     try {
-      const r = await fetch('/api/knowledge/cards/' + cardId);
-      const card = await r.json();
+      const [cardR, derivR, rulesR] = await Promise.all([
+        fetch('/api/knowledge/cards/' + cardId),
+        fetch('/api/knowledge/cards/' + cardId + '/derivatives'),
+        fetch('/api/knowledge/cards/' + cardId + '/agent-rules'),
+      ]);
+      const card = await cardR.json();
       if (card.error) { alert('加载失败'); return; }
+      const derivatives = (await derivR.json()).derivatives || [];
+      const rules = (await rulesR.json()).rules || [];
       const typeLabels = {
         audit_case: '审计案例', sop: 'SOP', prompt: '提示词', faq: 'FAQ',
         article: '文章素材', tool: '工具经验', risk: '风险线索',
         methodology: '方法论', note: '笔记',
       };
+      const lifecycleLabels = {
+        captured: '待消化', ingested: '已吸收', transformed: '已转化', applied: '已应用',
+      };
       let html = `<h3>${this.esc(card.title)}</h3>`;
+      // --- lifecycle + review actions ---
       html += `<div class="knowledge-meta" style="margin-bottom:12px">`;
       html += `<span>评分: <strong>${card.score}</strong></span>`;
       html += `<span>类型: ${this.esc(typeLabels[card.type] || card.type)}</span>`;
+      html += `<span>生命周期: ${this.esc(lifecycleLabels[card.lifecycle_stage] || card.lifecycle_stage || 'captured')}</span>`;
       html += `<span>日期: ${this.esc(card.date || '')}</span>`;
+      html += `</div>`;
+      html += `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">`;
+      html += `<button class="btn-tiny" data-lifecycle="${cardId}:ingested">吸收</button>`;
+      html += `<button class="btn-tiny" data-lifecycle="${cardId}:applied">标记已应用</button>`;
+      html += `<button class="btn-tiny" data-my-version="${cardId}">生成我的版本</button>`;
+      html += `<button class="btn-tiny" data-draft-rule="${cardId}">生成规则草案</button>`;
       html += `</div>`;
       if (card.summary) html += `<p><strong>摘要:</strong> ${this.esc(card.summary)}</p>`;
       if (card.why_valuable) html += `<p><strong>价值:</strong> ${this.esc(card.why_valuable)}</p>`;
@@ -347,10 +372,32 @@ const KnowledgeApp = {
           `<span class="knowledge-tag">${this.esc(t)}</span>`
         ).join('')}</div>`;
       }
+      // --- 原始知识 ---
       if (card.content_md) {
-        html += `<div class="knowledge-detail"><h4>正文</h4>`;
+        html += `<div class="knowledge-detail"><h4>原始知识</h4>`;
         html += `<div style="white-space:pre-wrap;font-size:13px;line-height:1.6">${this.esc(card.content_md)}</div></div>`;
       }
+      // --- 我的版本与其他转化 ---
+      if (derivatives.length) {
+        html += `<div class="knowledge-detail"><h4>我的版本与其他转化 (${derivatives.length})</h4>`;
+        for (const d of derivatives) {
+          const kindLabel = d.kind === 'my_version' ? '我的版本' : (typeLabels[d.kind] || d.kind);
+          html += `<div class="derivative-item" style="border:1px solid #30363d;border-radius:6px;padding:8px;margin:6px 0">`;
+          html += `<div style="color:#8b949e;font-size:12px;margin-bottom:4px">[${this.esc(kindLabel)}] ${this.esc(d.title || '')}</div>`;
+          html += `<div style="white-space:pre-wrap;font-size:13px;line-height:1.6">${this.esc(d.content_md)}</div>`;
+          html += `</div>`;
+        }
+        html += `</div>`;
+      }
+      // --- 规则草案与已发布规则 ---
+      if (rules.length) {
+        html += `<div class="knowledge-detail"><h4>规则草案与已发布规则 (${rules.length})</h4>`;
+        for (const rule of rules) {
+          html += this._renderRuleEditor(rule);
+        }
+        html += `</div>`;
+      }
+      // --- 来源 ---
       const sources = card.sources || [];
       if (sources.length) {
         html += `<div class="knowledge-detail"><h4>来源 (${sources.length})</h4>`;
@@ -366,10 +413,161 @@ const KnowledgeApp = {
         }
         html += `</div>`;
       }
-      document.getElementById('detail-content').innerHTML = html;
+      const content = document.getElementById('detail-content');
+      content.innerHTML = html;
       document.getElementById('detail-modal').classList.add('show');
     } catch (e) {
       alert('加载详情失败: ' + e.message);
+    }
+  },
+
+  _renderRuleEditor(rule) {
+    // Editable rule block; values pre-filled from the (already-escaped) rule.
+    const statusLabel = { draft: '草案', published: '已发布', archived: '已归档' }[rule.status] || rule.status;
+    const catOptions = ['engineering', 'audit', 'workflow', 'writing', 'ai_usage', 'general']
+      .map(c => `<option value="${c}" ${c === rule.category ? 'selected' : ''}>${c}</option>`).join('');
+    return `<div class="rule-item" data-rule-id="${this.esc(rule.id)}" style="border:1px solid #30363d;border-radius:6px;padding:8px;margin:6px 0">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="color:#8b949e;font-size:12px">[${this.esc(statusLabel)}] v${rule.version}</span>
+      </div>
+      <input class="text-input rule-title" value="${this.esc(rule.title)}" placeholder="规则标题" style="width:100%;margin-bottom:4px">
+      <select class="text-input rule-category" style="margin-bottom:4px">${catOptions}</select>
+      <textarea class="text-input rule-content" placeholder="规则正文（具体可执行的指令）" style="width:100%;min-height:80px;max-height:240px;resize:vertical;font-size:13px">${this.esc(rule.content_md)}</textarea>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button class="btn-tiny" data-save-rule="${this.esc(rule.id)}">保存草案</button>
+        <button class="btn-tiny btn-primary" data-publish-rule="${this.esc(rule.id)}">发布</button>
+        <button class="btn-tiny" data-archive-rule="${this.esc(rule.id)}">归档</button>
+      </div>
+    </div>`;
+  },
+
+  _handleDetailAction(e) {
+    // Delegated handler for buttons inside the detail modal.
+    const lc = e.target.closest('[data-lifecycle]');
+    if (lc) { e.preventDefault(); this.updateLifecycle(...lc.dataset.lifecycle.split(':')); return; }
+    const mv = e.target.closest('[data-my-version]');
+    if (mv) { e.preventDefault(); this.generateMyVersion(mv.dataset.myVersion); return; }
+    const dr = e.target.closest('[data-draft-rule]');
+    if (dr) { e.preventDefault(); this.draftRule(dr.dataset.draftRule); return; }
+    const sr = e.target.closest('[data-save-rule]');
+    if (sr) { e.preventDefault(); this.saveRule(sr.dataset.saveRule); return; }
+    const pr = e.target.closest('[data-publish-rule]');
+    if (pr) { e.preventDefault(); this.publishRule(pr.dataset.publishRule); return; }
+    const ar = e.target.closest('[data-archive-rule]');
+    if (ar) { e.preventDefault(); this.archiveRule(ar.dataset.archiveRule); return; }
+  },
+
+  async updateLifecycle(cardId, stage) {
+    try {
+      const r = await fetch('/api/knowledge/cards/' + cardId + '/lifecycle', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lifecycle_stage: stage }),
+      });
+      const data = await r.json();
+      if (!r.ok) { alert(data.error || '失败'); return; }
+      this.loadCards();
+      if (this._detailCardId === cardId) this.showDetail(cardId);
+    } catch (e) { alert('失败: ' + e.message); }
+  },
+
+  async generateMyVersion(cardId) {
+    if (this._busy) return;
+    this._busy = true;
+    try {
+      const r = await fetch('/api/knowledge/cards/' + cardId + '/my-version', { method: 'POST' });
+      const data = await r.json();
+      if (!r.ok) { alert(data.error || '生成失败'); return; }
+      alert('已生成"我的版本"（原卡保留不变）');
+      if (this._detailCardId === cardId) this.showDetail(cardId);
+    } catch (e) { alert('生成失败: ' + e.message); }
+    finally { this._busy = false; }
+  },
+
+  async draftRule(cardId) {
+    if (this._busy) return;
+    this._busy = true;
+    try {
+      const r = await fetch('/api/knowledge/cards/' + cardId + '/agent-rules/draft', { method: 'POST' });
+      const data = await r.json();
+      if (!r.ok) { alert(data.error || '生成失败'); return; }
+      alert('已生成规则草案，请在详情中编辑后发布');
+      if (this._detailCardId === cardId) this.showDetail(cardId);
+      this.loadAgentRuleStats();
+    } catch (e) { alert('生成失败: ' + e.message); }
+    finally { this._busy = false; }
+  },
+
+  async saveRule(ruleId) {
+    const block = document.querySelector(`[data-rule-id="${ruleId}"]`);
+    if (!block) return;
+    const title = block.querySelector('.rule-title').value;
+    const category = block.querySelector('.rule-category').value;
+    const content_md = block.querySelector('.rule-content').value;
+    try {
+      const r = await fetch('/api/knowledge/agent-rules/' + ruleId, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, category, content_md }),
+      });
+      const data = await r.json();
+      if (!r.ok) { alert(data.error || '保存失败'); return; }
+      alert('草案已保存（v' + data.rule.version + '）');
+    } catch (e) { alert('保存失败: ' + e.message); }
+  },
+
+  async publishRule(ruleId) {
+    if (!confirm('发布该规则？发布后会同步到 vault 的 published/ 目录。')) return;
+    try {
+      const r = await fetch('/api/knowledge/agent-rules/' + ruleId + '/publish', { method: 'POST' });
+      const data = await r.json();
+      if (!r.ok) { alert(data.error || '发布失败'); return; }
+      alert('已发布');
+      if (this._detailCardId) this.showDetail(this._detailCardId);
+      this.loadAgentRuleStats();
+    } catch (e) { alert('发布失败: ' + e.message); }
+  },
+
+  async archiveRule(ruleId) {
+    if (!confirm('归档该规则？')) return;
+    try {
+      const r = await fetch('/api/knowledge/agent-rules/' + ruleId + '/archive', { method: 'POST' });
+      if (!r.ok) { alert('归档失败'); return; }
+      if (this._detailCardId) this.showDetail(this._detailCardId);
+      this.loadAgentRuleStats();
+    } catch (e) { alert('归档失败: ' + e.message); }
+  },
+
+  async loadAgentRuleStats() {
+    const el = document.getElementById('agent-rule-summary');
+    if (!el) return;
+    try {
+      const r = await fetch('/api/knowledge/agent-rules/stats');
+      const s = await r.json();
+      el.innerHTML = `草案 <b>${s.draft || 0}</b> · 已发布 <b>${s.published || 0}</b> · 已归档 <b>${s.archived || 0}</b>`;
+    } catch (e) { el.textContent = '加载规则统计失败'; }
+  },
+
+  async syncAgentRules() {
+    const resultEl = document.getElementById('agent-rule-sync-result');
+    const btn = document.getElementById('btn-sync-agent-rules');
+    if (resultEl) resultEl.textContent = '⏳ 同步中...';
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('/api/knowledge/sync-agent-rules', { method: 'POST' });
+      const data = await r.json();
+      if (!r.ok) {
+        if (resultEl) resultEl.textContent = '✗ ' + (data.error || '同步失败');
+        alert(data.error || '同步失败');
+        return;
+      }
+      if (resultEl) {
+        const errs = data.errors && data.errors.length ? `，${data.errors.length} 个错误` : '';
+        resultEl.innerHTML = `✓ 同步完成：写入 <b>${data.written}</b>，跳过 <b>${data.skipped}</b>${errs}`;
+      }
+      this.loadAgentRuleStats();
+    } catch (e) {
+      if (resultEl) resultEl.textContent = '✗ 同步失败: ' + e.message;
+    } finally {
+      if (btn) btn.disabled = false;
     }
   },
 
@@ -859,8 +1057,11 @@ const KnowledgeApp = {
   },
 };
 
-// Global convert click handler
-document.addEventListener('click', (e) => KnowledgeApp._handleConvert(e));
+// Global delegated click handler: convert menu + detail-modal rule/lifecycle actions.
+document.addEventListener('click', (e) => {
+  KnowledgeApp._handleConvert(e);
+  KnowledgeApp._handleDetailAction(e);
+});
 
 // Close menus on outside click
 document.addEventListener('click', (e) => {
