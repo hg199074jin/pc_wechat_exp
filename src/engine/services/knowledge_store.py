@@ -8,6 +8,12 @@ import threading
 import time
 import uuid
 
+# Schema version tracked via SQLite PRAGMA user_version. Bump when a migration
+# is added. init_db only caches a db_path as initialised once its user_version
+# reaches CURRENT_SCHEMA_VERSION, so an old database is never skipped before its
+# migrations run.
+CURRENT_SCHEMA_VERSION = 2
+
 # Cache of db paths already initialised in this process, so we don't re-run the
 # full CREATE TABLE/INDEX script on every save_card/list_cards call.
 _init_lock = threading.Lock()
@@ -32,10 +38,12 @@ def _connect(db_path: str) -> sqlite3.Connection:
 
 
 def init_db(db_path: str) -> None:
-    """Create tables and indexes if they don't exist (runs once per db_path)."""
-    # Skip the DDL script if we have already initialised this database in this
-    # process — it is idempotent anyway, but re-running it on every call was a
-    # major performance and lock-contention hotspot during batch scans.
+    """Create tables/indexes and run migrations (idempotent, schema-versioned).
+
+    A db_path is only cached as initialised once its user_version reaches
+    CURRENT_SCHEMA_VERSION, so an old user database is never skipped before its
+    migrations (e.g. adding lifecycle_stage) have committed.
+    """
     abs_path = os.path.abspath(db_path)
     with _init_lock:
         if abs_path in _initialized_dbs:
@@ -88,6 +96,8 @@ def init_db(db_path: str) -> None:
         CREATE INDEX IF NOT EXISTS idx_kc_score ON knowledge_cards(score);
         CREATE INDEX IF NOT EXISTS idx_ks_card_id ON knowledge_sources(card_id);
         """)
+        # --- migrations to CURRENT_SCHEMA_VERSION ---
+        _migrate(conn)
         conn.commit()
         with _init_lock:
             _initialized_dbs.add(abs_path)
@@ -95,9 +105,80 @@ def init_db(db_path: str) -> None:
         conn.close()
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Apply idempotent migrations up to CURRENT_SCHEMA_VERSION."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+
+    # v1 -> v2: lifecycle_stage + derivatives + agent_rules.
+    if version < 1:
+        # Add lifecycle_stage to existing knowledge_cards (default captured).
+        if not _column_exists(conn, 'knowledge_cards', 'lifecycle_stage'):
+            conn.execute(
+                "ALTER TABLE knowledge_cards ADD COLUMN lifecycle_stage "
+                "TEXT NOT NULL DEFAULT 'captured'"
+            )
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_derivatives (
+          id TEXT PRIMARY KEY,
+          card_id TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'my_version',
+          title TEXT NOT NULL DEFAULT '',
+          content_md TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY(card_id) REFERENCES knowledge_cards(id) ON DELETE CASCADE
+        );
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_rules (
+          id TEXT PRIMARY KEY,
+          source_card_id TEXT NOT NULL,
+          derivative_id TEXT,
+          title TEXT NOT NULL DEFAULT '',
+          category TEXT NOT NULL DEFAULT 'general',
+          content_md TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'draft',
+          target_scope TEXT NOT NULL DEFAULT 'shared',
+          target_project TEXT NOT NULL DEFAULT '',
+          target_path TEXT NOT NULL DEFAULT '',
+          version INTEGER NOT NULL DEFAULT 1,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          published_at INTEGER,
+          FOREIGN KEY(source_card_id) REFERENCES knowledge_cards(id) ON DELETE RESTRICT,
+          FOREIGN KEY(derivative_id) REFERENCES knowledge_derivatives(id) ON DELETE SET NULL
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_kd_card_id ON knowledge_derivatives(card_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ar_source_card_id ON agent_rules(source_card_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ar_status ON agent_rules(status);")
+        conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+
+
+
 # ---------------------------------------------------------------------------
 # Card helpers
 # ---------------------------------------------------------------------------
+
+# Independent use dimension (separate from review status). Existing cards
+# migrate to 'captured' and stay backward compatible.
+LIFECYCLE_STAGES = {'captured', 'ingested', 'transformed', 'applied'}
+
+# Valid derivative kinds: my_version is a personal-interpretation derivative;
+# the rest are structured rewrites aligned with the conversion targets.
+DERIVATIVE_KINDS = {
+    'my_version', 'audit_case', 'sop', 'prompt', 'faq', 'article', 'script',
+}
+
+# Agent rule statuses and categories.
+RULE_STATUSES = {'draft', 'published', 'archived'}
+RULE_CATEGORIES = {'engineering', 'audit', 'workflow', 'writing', 'ai_usage', 'general'}
+
 
 def _row_to_card(row: sqlite3.Row) -> dict:
     d = dict(row)
@@ -128,11 +209,20 @@ def save_card(db_path: str, card: dict) -> str:
             created_at = existing['created_at'] if existing else now
         else:
             created_at = int(card['created_at'])
+        # Preserve lifecycle_stage across re-saves (INSERT OR REPLACE would
+        # otherwise reset an ingested/transformed/applied card back to captured).
+        if card.get('lifecycle_stage') is None:
+            existing = conn.execute(
+                "SELECT lifecycle_stage FROM knowledge_cards WHERE id = ?", (card_id,)
+            ).fetchone()
+            lifecycle = existing['lifecycle_stage'] if existing else 'captured'
+        else:
+            lifecycle = card['lifecycle_stage'] if card['lifecycle_stage'] in LIFECYCLE_STAGES else 'captured'
         conn.execute("""
           INSERT OR REPLACE INTO knowledge_cards
           (id, title, type, status, score, summary, why_valuable, content_md,
-           tags_json, source_chat_ids_json, date, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           tags_json, source_chat_ids_json, date, created_at, updated_at, lifecycle_stage)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             card_id,
             (card.get('title') or '').strip(),
@@ -147,6 +237,7 @@ def save_card(db_path: str, card: dict) -> str:
             card.get('date') or '',
             created_at,
             now,
+            lifecycle,
         ))
         # Replace sources
         conn.execute("DELETE FROM knowledge_sources WHERE card_id = ?", (card_id,))
@@ -258,13 +349,19 @@ def update_card(db_path: str, card_id: str, updates: dict) -> bool:
         if not row:
             return False
         allowed = {'title', 'type', 'status', 'score', 'summary', 'why_valuable',
-                   'content_md', 'tags', 'date'}
+                   'content_md', 'tags', 'date', 'lifecycle_stage'}
         sets, params = ["updated_at = ?"], [int(time.time())]
         for key in allowed:
             if key in updates:
                 if key == 'tags':
                     sets.append("tags_json = ?")
                     params.append(json.dumps(updates[key], ensure_ascii=False))
+                elif key == 'lifecycle_stage':
+                    stage = updates[key]
+                    if stage not in LIFECYCLE_STAGES:
+                        raise ValueError(f'invalid lifecycle_stage: {stage}')
+                    sets.append("lifecycle_stage = ?")
+                    params.append(stage)
                 else:
                     sets.append(f"{key} = ?")
                     params.append(updates[key])
@@ -276,16 +373,37 @@ def update_card(db_path: str, card_id: str, updates: dict) -> bool:
         conn.close()
 
 
-def delete_card(db_path: str, card_id: str) -> bool:
-    """Delete a card and its sources. Returns True if found."""
+def delete_card(db_path: str, card_id: str):
+    """Delete a card and its cascading sources/derivatives.
+
+    Returns True if deleted. Raises CardHasRulesError if the card still has
+    agent_rules (a published rule may be in use); the caller should surface a
+    409. Cards without rules delete normally; derivatives cascade with the card.
+    The ON DELETE RESTRICT on agent_rules.source_card_id is the final backstop
+    for concurrent/out-of-band deletes.
+    """
     init_db(db_path)
     conn = _connect(db_path)
     try:
+        rule_count = conn.execute(
+            "SELECT COUNT(*) FROM agent_rules WHERE source_card_id = ?", (card_id,)
+        ).fetchone()[0]
+        if rule_count > 0:
+            raise CardHasRulesError(card_id, rule_count)
         cur = conn.execute("DELETE FROM knowledge_cards WHERE id = ?", (card_id,))
         conn.commit()
         return cur.rowcount > 0
     finally:
         conn.close()
+
+
+class CardHasRulesError(Exception):
+    """Raised when deleting a card that still has agent_rules attached."""
+
+    def __init__(self, card_id: str, rule_count: int):
+        self.card_id = card_id
+        self.rule_count = rule_count
+        super().__init__(f'card {card_id} has {rule_count} agent rule(s); archive rules first')
 
 
 def bulk_update(db_path: str, card_ids: list, action: str, tags: list = None) -> int:
@@ -406,5 +524,216 @@ def get_stats(db_path: str) -> dict:
             'by_type': by_type,
             'avg_score': round(avg_score, 1),
         }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Knowledge derivatives (one card -> many immutable derivatives)
+# ---------------------------------------------------------------------------
+
+def create_derivative(db_path: str, card_id: str, kind: str,
+                      title: str, content_md: str) -> str:
+    """Create a derivative for a card. Returns derivative id.
+
+    Validates kind against DERIVATIVE_KINDS. After commit, bumps the card's
+    lifecycle_stage to 'transformed' (only if currently captured/ingested, so
+    an already-applied card is not regressed).
+    """
+    if kind not in DERIVATIVE_KINDS:
+        raise ValueError(f'invalid derivative kind: {kind}')
+    init_db(db_path)
+    deriv_id = str(uuid.uuid4())
+    now = int(time.time())
+    conn = _connect(db_path)
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM knowledge_cards WHERE id = ?", (card_id,)
+        ).fetchone()
+        if not exists:
+            raise ValueError(f'unknown card: {card_id}')
+        conn.execute("""
+          INSERT INTO knowledge_derivatives
+          (id, card_id, kind, title, content_md, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (deriv_id, card_id, kind, title or '', content_md or '', now, now))
+        conn.execute(
+            "UPDATE knowledge_cards SET lifecycle_stage = 'transformed', updated_at = ? "
+            "WHERE id = ? AND lifecycle_stage IN ('captured', 'ingested')",
+            (now, card_id),
+        )
+        conn.commit()
+        return deriv_id
+    finally:
+        conn.close()
+
+
+def list_derivatives(db_path: str, card_id: str) -> list:
+    """List derivatives for a card, oldest first."""
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM knowledge_derivatives WHERE card_id = ? ORDER BY created_at",
+            (card_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_derivative(db_path: str, derivative_id: str) -> dict | None:
+    """Load a single derivative."""
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM knowledge_derivatives WHERE id = ?", (derivative_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Agent rules (draft -> published -> archived; LLM never publishes)
+# ---------------------------------------------------------------------------
+
+def create_agent_rule(db_path: str, source_card_id: str, *,
+                      derivative_id: str = None, title: str = '',
+                      category: str = 'general', content_md: str = '',
+                      target_scope: str = 'shared', target_project: str = '',
+                      target_path: str = '') -> str:
+    """Create a draft agent rule. Returns rule id."""
+    if category not in RULE_CATEGORIES:
+        category = 'general'
+    init_db(db_path)
+    rule_id = str(uuid.uuid4())
+    now = int(time.time())
+    conn = _connect(db_path)
+    try:
+        conn.execute("""
+          INSERT INTO agent_rules
+          (id, source_card_id, derivative_id, title, category, content_md, status,
+           target_scope, target_project, target_path, version, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, 1, ?, ?)
+        """, (rule_id, source_card_id, derivative_id, title, category, content_md,
+              target_scope, target_project, target_path, now, now))
+        conn.commit()
+        return rule_id
+    finally:
+        conn.close()
+
+
+def get_agent_rule(db_path: str, rule_id: str) -> dict | None:
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute("SELECT * FROM agent_rules WHERE id = ?", (rule_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_agent_rules(db_path: str, source_card_id: str = None,
+                     status: str = None) -> list:
+    """List agent rules, optionally filtered by card and/or status."""
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        where, params = [], []
+        if source_card_id:
+            where.append("source_card_id = ?")
+            params.append(source_card_id)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = conn.execute(
+            f"SELECT * FROM agent_rules{clause} ORDER BY updated_at DESC", params
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_agent_rule(db_path: str, rule_id: str, updates: dict) -> bool:
+    """Update editable rule fields. Increments version for content/metadata
+    changes. Returns True if found. Published rules cannot be edited."""
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute("SELECT * FROM agent_rules WHERE id = ?", (rule_id,)).fetchone()
+        if not row:
+            return False
+        allowed = {'title', 'category', 'content_md', 'target_scope',
+                   'target_project', 'target_path'}
+        sets, params = [], []
+        bumped = False
+        for key in allowed:
+            if key in updates:
+                if key == 'category' and updates[key] not in RULE_CATEGORIES:
+                    continue
+                sets.append(f"{key} = ?")
+                params.append(updates[key])
+                bumped = True
+        if bumped:
+            sets.append("version = version + 1")
+        sets.append("updated_at = ?")
+        params.append(int(time.time()))
+        params.append(rule_id)
+        conn.execute(f"UPDATE agent_rules SET {', '.join(sets)} WHERE id = ?", params)
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def publish_agent_rule(db_path: str, rule_id: str) -> dict | None:
+    """Publish a rule. Rejects blank title/body. Returns the published rule."""
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute("SELECT * FROM agent_rules WHERE id = ?", (rule_id,)).fetchone()
+        if not row:
+            return None
+        if not (row['title'] or '').strip() or not (row['content_md'] or '').strip():
+            raise ValueError('rule title and content_md must not be blank')
+        now = int(time.time())
+        conn.execute(
+            "UPDATE agent_rules SET status = 'published', published_at = ?, updated_at = ? "
+            "WHERE id = ?",
+            (now, now, rule_id),
+        )
+        conn.commit()
+        return get_agent_rule(db_path, rule_id)
+    finally:
+        conn.close()
+
+
+def archive_agent_rule(db_path: str, rule_id: str) -> bool:
+    """Archive a rule. Returns True if found."""
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE agent_rules SET status = 'archived', updated_at = ? WHERE id = ?",
+            (int(time.time()), rule_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_agent_rule_stats(db_path: str) -> dict:
+    """Return counts by rule status for the sidebar summary."""
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        by_status = {'draft': 0, 'published': 0, 'archived': 0}
+        for row in conn.execute("SELECT status, COUNT(*) as cnt FROM agent_rules GROUP BY status"):
+            by_status[row['status']] = row['cnt']
+        return by_status
     finally:
         conn.close()

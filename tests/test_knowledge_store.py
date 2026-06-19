@@ -9,6 +9,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from engine.services.knowledge_store import (
     init_db, save_card, get_card, list_cards, update_card, delete_card,
     bulk_update, create_run, finish_run, list_runs, get_stats,
+    create_derivative, list_derivatives, get_derivative,
+    create_agent_rule, get_agent_rule, list_agent_rules, update_agent_rule,
+    publish_agent_rule, archive_agent_rule, get_agent_rule_stats,
+    CardHasRulesError, CURRENT_SCHEMA_VERSION,
 )
 
 
@@ -169,6 +173,175 @@ def test_init_db_cached_does_not_rebuild(tmp_path):
     ks.init_db(db_path)
     cid = save_card(db_path, {'title': 'survives cache', 'score': 50})
     assert get_card(db_path, cid) is not None
+
+
+# ---------------------------------------------------------------------------
+# Migration / lifecycle / derivatives / agent rules (Task 2)
+# ---------------------------------------------------------------------------
+
+def _make_old_db(db_path):
+    """Create a pre-migration database without lifecycle_stage/derivatives/rules."""
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.execute("""CREATE TABLE knowledge_cards (
+        id TEXT PRIMARY KEY, title TEXT, type TEXT DEFAULT 'note',
+        status TEXT DEFAULT 'inbox', score INTEGER DEFAULT 0,
+        summary TEXT DEFAULT '', why_valuable TEXT DEFAULT '',
+        content_md TEXT DEFAULT '', tags_json TEXT DEFAULT '[]',
+        source_chat_ids_json TEXT DEFAULT '[]', date TEXT DEFAULT '',
+        created_at INTEGER, updated_at INTEGER)""")
+    conn.execute("INSERT INTO knowledge_cards (id, title, created_at, updated_at) VALUES ('c1', 'old', 1, 1)")
+    conn.commit()
+    conn.close()
+
+
+def test_migration_adds_lifecycle_and_tables(tmp_path):
+    db_path = str(tmp_path / 'knowledge.db')
+    _make_old_db(db_path)
+    init_db(db_path)
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(knowledge_cards)")}
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert 'lifecycle_stage' in cols
+    assert 'knowledge_derivatives' in tables
+    assert 'agent_rules' in tables
+    assert version == CURRENT_SCHEMA_VERSION
+    # Old card survives with default lifecycle.
+    card = get_card(db_path, 'c1')
+    assert card['lifecycle_stage'] == 'captured'
+
+
+def test_migration_is_idempotent(tmp_path):
+    """Second init_db after creating derivatives/rules must not drop data."""
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'title': 'card', 'score': 80})
+    did = create_derivative(db_path, cid, 'my_version', '我的版本', '内容')
+    rid = create_agent_rule(db_path, cid, title='规则', content_md='正文')
+    # Re-run init_db (simulates process restart or concurrent init).
+    init_db(db_path)
+    assert get_derivative(db_path, did) is not None
+    assert get_agent_rule(db_path, rid) is not None
+    assert get_card(db_path, cid)['lifecycle_stage'] == 'transformed'
+
+
+def test_update_card_lifecycle_preserves_other_fields(tmp_path):
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'title': 'T', 'score': 70, 'content_md': '正文'})
+    assert update_card(db_path, cid, {'lifecycle_stage': 'ingested'})
+    card = get_card(db_path, cid)
+    assert card['lifecycle_stage'] == 'ingested'
+    assert card['score'] == 70
+    assert card['content_md'] == '正文'
+
+
+def test_update_card_rejects_invalid_lifecycle(tmp_path):
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'title': 'T'})
+    import pytest
+    with pytest.raises(ValueError):
+        update_card(db_path, cid, {'lifecycle_stage': 'bogus'})
+
+
+def test_save_card_preserves_lifecycle_on_resave(tmp_path):
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'title': 'T', 'score': 60})
+    update_card(db_path, cid, {'lifecycle_stage': 'applied'})
+    # Re-scan re-saves the card without lifecycle_stage; must stay 'applied'.
+    save_card(db_path, {'id': cid, 'title': 'T2', 'score': 90})
+    assert get_card(db_path, cid)['lifecycle_stage'] == 'applied'
+
+
+def test_create_derivative_does_not_overwrite_card(tmp_path):
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'title': '原卡', 'type': 'note', 'content_md': '原文', 'score': 70})
+    did = create_derivative(db_path, cid, 'my_version', '我的版本', '转化内容')
+    card = get_card(db_path, cid)
+    assert card['content_md'] == '原文'      # original unchanged
+    assert card['type'] == 'note'
+    assert card['lifecycle_stage'] == 'transformed'
+    derivs = list_derivatives(db_path, cid)
+    assert len(derivs) == 1
+    assert derivs[0]['id'] == did
+    assert derivs[0]['kind'] == 'my_version'
+
+
+def test_create_derivative_rejects_invalid_kind(tmp_path):
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'title': 'T'})
+    import pytest
+    with pytest.raises(ValueError):
+        create_derivative(db_path, cid, 'bogus', 'x', 'y')
+
+
+def test_agent_rule_lifecycle_publish_archive(tmp_path):
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'title': 'T', 'score': 90})
+    rid = create_agent_rule(db_path, cid, title='规则', category='engineering', content_md='正文')
+    assert get_agent_rule(db_path, rid)['status'] == 'draft'
+    # Publish.
+    published = publish_agent_rule(db_path, rid)
+    assert published['status'] == 'published'
+    assert published['published_at'] is not None
+    # Update bumps version.
+    assert update_agent_rule(db_path, rid, {'title': '规则2'})
+    assert get_agent_rule(db_path, rid)['version'] == 2
+    # Archive.
+    assert archive_agent_rule(db_path, rid)
+    assert get_agent_rule(db_path, rid)['status'] == 'archived'
+
+
+def test_publish_rejects_blank_rule(tmp_path):
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'title': 'T'})
+    rid = create_agent_rule(db_path, cid, title='', content_md='')
+    import pytest
+    with pytest.raises(ValueError):
+        publish_agent_rule(db_path, rid)
+
+
+def test_agent_rule_stats(tmp_path):
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'title': 'T'})
+    r1 = create_agent_rule(db_path, cid, title='a', content_md='x')
+    r2 = create_agent_rule(db_path, cid, title='b', content_md='y')
+    publish_agent_rule(db_path, r1)
+    stats = get_agent_rule_stats(db_path)
+    assert stats['draft'] == 1
+    assert stats['published'] == 1
+    assert stats['archived'] == 0
+
+
+def test_delete_card_blocked_when_has_rules(tmp_path):
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'title': 'T'})
+    create_agent_rule(db_path, cid, title='r', content_md='c')
+    import pytest
+    with pytest.raises(CardHasRulesError):
+        delete_card(db_path, cid)
+    # Card still exists.
+    assert get_card(db_path, cid) is not None
+
+
+def test_delete_card_cascades_derivatives(tmp_path):
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'title': 'T'})
+    did = create_derivative(db_path, cid, 'my_version', 'd', 'content')
+    assert delete_card(db_path, cid)
+    assert get_derivative(db_path, did) is None  # cascaded
 
 
 def test_stats(tmp_path):
