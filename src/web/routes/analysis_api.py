@@ -74,8 +74,12 @@ def put_config():
     data = request.get_json(silent=True) or {}
     llm_cfg = data.get('llm', {})
     config_path = _config_path()
-    # If mask matches existing, keep real key
-    if llm_cfg.get('api_key', '').startswith('sk-') and '*' in llm_cfg.get('api_key', ''):
+    # If the submitted api_key is empty or a masked placeholder (contains '*'),
+    # keep the previously stored real key. We detect masking by the '*'
+    # character rather than a 'sk-' prefix, so non-OpenAI keys
+    # (智谱/MiniMax/Kimi/通义...) are not overwritten by their masked/empty form.
+    submitted_key = llm_cfg.get('api_key', '')
+    if not submitted_key or '*' in submitted_key:
         existing = ai_analyzer.load_llm_config(config_path)
         llm_cfg['api_key'] = existing.get('api_key', '')
     ai_analyzer.save_llm_config(llm_cfg, config_path)
@@ -94,10 +98,22 @@ def test_connection():
             base_url=cfg['base_url'], api_key=cfg['api_key'],
             model=cfg['model'], temperature=cfg.get('temperature', 0.3),
             max_tokens=64, timeout=ai_analyzer._llm_timeout(cfg),
+            proxy=cfg.get('proxy', 'auto'),
         )
         return jsonify({'ok': True, 'reply': reply[:200]})
     except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        # Avoid forwarding raw upstream response bodies (which may contain key
+        # fragments or garbled content) to the browser; give a concise hint.
+        msg = str(e)
+        if 'timed out' in msg or 'timeout' in msg.lower():
+            hint = '连接超时，请检查网络、代理设置或调高 Timeout'
+        elif 'Proxy' in msg or 'proxy' in msg.lower() or 'Connection' in msg:
+            hint = '网络/代理连接失败，国内服务建议在"代理"选"不使用代理"'
+        elif '401' in msg or 'Unauthorized' in msg:
+            hint = '认证失败 (401)，请检查 API Key'
+        else:
+            hint = '连接失败，请检查 Base URL、API Key 与模型名'
+        return jsonify({'ok': False, 'error': hint}), 500
 
 
 # ---------------------------------------------------------------------------

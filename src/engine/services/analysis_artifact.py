@@ -11,9 +11,20 @@ def _safe_id(chat_id: str) -> str:
     return ''.join(c if c.isalnum() or c in '_@' else '_' for c in (chat_id or ''))
 
 
+def _safe_date(date: str) -> str:
+    """Sanitise a date label for use in a filename.
+
+    Keeps digits, hyphens, underscores and letters (for the '_to_' range
+    separator); replaces path separators and anything else with '_'.
+    """
+    import re as _re
+    text = str(date or '')
+    return _re.sub(r'[^0-9_a-zA-Z-]', '_', text) or 'unknown_date'
+
+
 def artifact_path(storage_dir: str, chat_id: str, date: str) -> str:
     """Return absolute path to the artifact sidecar for (chat_id, date)."""
-    return os.path.join(storage_dir, _safe_id(chat_id), f'{date}.artifact.json')
+    return os.path.join(storage_dir, _safe_id(chat_id), f'{_safe_date(date)}.artifact.json')
 
 
 def extract_json_object(raw: str) -> str:
@@ -120,11 +131,18 @@ def normalize_artifact(data: dict, *, chat_id: str, group_name: str,
 
 
 def save_artifact(storage_dir: str, artifact: dict) -> str:
-    """Save artifact to disk and return path."""
+    """Save artifact to disk atomically and return path.
+
+    Writes to a sibling ``.tmp`` file first, then ``os.replace`` swaps it into
+    place, so a crash mid-write never leaves a truncated ``.artifact.json``
+    that would otherwise show up as a ghost entry in the results list.
+    """
     path = artifact_path(storage_dir, artifact.get('chat_id', ''), artifact.get('date', ''))
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(artifact, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
     return path
 
 

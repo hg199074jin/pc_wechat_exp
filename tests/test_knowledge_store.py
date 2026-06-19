@@ -130,6 +130,47 @@ def test_run_history(tmp_path):
     assert runs[0]['card_count'] == 5
 
 
+def test_save_card_preserves_created_at_on_replace(tmp_path):
+    """Re-saving a card without created_at must keep the original timestamp."""
+    import time as _time
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    before = int(_time.time())
+    card_id = save_card(db_path, {'title': 'First', 'score': 60})
+    original = get_card(db_path, card_id)
+    assert original['created_at'] >= before
+    # Re-save without created_at (typical re-scan): created_at must not reset.
+    _time.sleep(1)
+    save_card(db_path, {'id': card_id, 'title': 'Updated', 'score': 90})
+    updated = get_card(db_path, card_id)
+    assert updated['created_at'] == original['created_at']
+    assert updated['score'] == 90
+
+
+def test_list_cards_escapes_like_wildcards(tmp_path):
+    """Search terms with % or _ must be matched literally, not as patterns."""
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    save_card(db_path, {'title': '100%完成', 'score': 80})
+    save_card(db_path, {'title': '另一个卡片', 'score': 70})
+    result = list_cards(db_path, q='%', limit=10)
+    # Only the card literally containing '%' should match, not both.
+    titles = [c['title'] for c in result['cards']]
+    assert titles == ['100%完成']
+
+
+def test_init_db_cached_does_not_rebuild(tmp_path):
+    """init_db should skip the DDL script after the first run for a db_path."""
+    from engine.services import knowledge_store as ks
+    db_path = str(tmp_path / 'knowledge.db')
+    ks.init_db(db_path)
+    assert os.path.abspath(db_path) in ks._initialized_dbs
+    # Second call is a no-op (cached); should not raise and should not drop data.
+    ks.init_db(db_path)
+    cid = save_card(db_path, {'title': 'survives cache', 'score': 50})
+    assert get_card(db_path, cid) is not None
+
+
 def test_stats(tmp_path):
     db_path = str(tmp_path / 'knowledge.db')
     init_db(db_path)

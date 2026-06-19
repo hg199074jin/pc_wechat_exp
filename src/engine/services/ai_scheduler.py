@@ -44,9 +44,17 @@ def _resolve_group_names(decrypted_dir: str, chat_ids: list) -> dict:
     return {cid: resolve_wxid(decrypted_dir, cid) or cid for cid in chat_ids}
 
 
-def _run_for_schedules(decrypted_dir: str, date: str,
-                       config_path: str) -> list:
-    """Execute analysis for all enabled schedules (used by daily trigger)."""
+def _run_for_schedules(decrypted_dir: str, config_path: str,
+                       date: str = None) -> list:
+    """Execute analysis for all enabled schedules (used by daily trigger).
+
+    ``date`` is computed at trigger time (not registration time) so each daily
+    run analyses the correct "yesterday". Defaults to yesterday when omitted.
+    """
+    # Compute the target date when the job actually fires, not when it was
+    # registered — otherwise every future run reuses a stale date.
+    if date is None:
+        date = _yesterday_str()
     schedules = ai_analyzer.list_schedules(config_path)
     results = []
     for sched in schedules:
@@ -68,8 +76,7 @@ def trigger_due_jobs(config_path: str, decrypted_dir: str) -> list:
     """Trigger all enabled schedules (one-shot). Used by tests and manual trigger."""
     if not os.path.isfile(config_path):
         return []
-    date = _yesterday_str(_today())
-    return _run_for_schedules(decrypted_dir, date, config_path)
+    return _run_for_schedules(decrypted_dir, config_path)
 
 
 def _schedule_job(sched: dict, config_path: str, decrypted_dir: str):
@@ -89,7 +96,10 @@ def _schedule_job(sched: dict, config_path: str, decrypted_dir: str):
         trigger='interval',
         days=1,
         start_date=run_at,
-        args=[decrypted_dir, _yesterday_str(), config_path],
+        # NOTE: date is intentionally NOT passed here — _run_for_schedules
+        # computes "yesterday" at trigger time, so each daily run targets the
+        # correct day instead of the registration day.
+        args=[decrypted_dir, config_path],
         id=job_id,
         replace_existing=True,
         misfire_grace_time=3600,

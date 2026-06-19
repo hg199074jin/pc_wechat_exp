@@ -1,16 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('src', 'src'), ('..\\tools\\silk_decoder.exe', 'tools')]
 binaries = []
-hiddenimports = ['Crypto.Cipher.AES', 'Crypto.Util.Padding', 'flask', 'werkzeug', 'jinja2', 'blackboxprotobuf', 'zstandard', 'openpyxl', 'jieba', 'jieba.posseg', 'requests', 'socks', 'pypinyin']
+hiddenimports = ['Crypto.Cipher.AES', 'Crypto.Util.Padding', 'flask', 'werkzeug', 'jinja2', 'blackboxprotobuf', 'zstandard', 'openpyxl', 'jieba', 'jieba.posseg', 'requests', 'socks', 'pypinyin', 'apscheduler.schedulers.background', 'apscheduler.triggers.interval', 'apscheduler.jobstores.memory', 'apscheduler.executors.pool', 'docx']
 tmp_ret = collect_all('jieba')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# apscheduler uses dynamic imports; collect its data/submodules so the bundled
+# exe can start the AI-analysis and knowledge-scan schedulers.
+tmp_ret = collect_all('apscheduler')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+# Resolve the entry script relative to this spec file so the build works from
+# any checkout location (the old path was hardcoded to one developer's machine).
+_spec_dir = os.path.dirname(os.path.abspath(SPEC))
+_entry = os.path.join(_spec_dir, 'main.py')
 
 a = Analysis(
-    ['D:\\perl_wrk\\PC_Wechat\\wechat-exp\\src\\main.py'],
-    pathex=[],
+    [_entry],
+    pathex=[_spec_dir],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

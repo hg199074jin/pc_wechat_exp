@@ -583,10 +583,30 @@ def delete_schedule(schedule_id: str, config_path: str) -> bool:
 # Analysis orchestration
 # ---------------------------------------------------------------------------
 
+def _safe_date(date: str) -> str:
+    """Sanitise a date label for use in a filename.
+
+    Only digits, hyphens, underscores and the literal '_to_' range separator
+    are kept; anything else (notably path separators ``/`` and ``\\`` that
+    enable traversal on Windows) is replaced with ``_``.
+    """
+    text = str(date or '')
+    return re.sub(r'[^0-9_a-zA-Z-]', '_', text) or 'unknown_date'
+
+
 def result_path(storage_dir: str, chat_id: str, date: str) -> str:
     """Return absolute path to the Markdown file for (chat_id, date)."""
     safe_id = ''.join(c if c.isalnum() or c in '_@' else '_' for c in chat_id)
-    return os.path.join(storage_dir, safe_id, f'{date}.md')
+    return os.path.join(storage_dir, safe_id, f'{_safe_date(date)}.md')
+
+
+def _atomic_write_text(path: str, text: str) -> None:
+    """Write text to ``path`` atomically (tmp file + os.replace)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 
 def period_label(start_date: str, end_date: str) -> str:
@@ -853,10 +873,8 @@ def analyze_group(decrypted_dir: str, chat_id: str, group_name: str,
     markdown = sanitize_analysis_markdown(markdown, group_name)
 
     out = result_path(storage_dir_for(decrypted_dir), chat_id, date)
-    os.makedirs(os.path.dirname(out), exist_ok=True)
     try:
-        with open(out, 'w', encoding='utf-8') as f:
-            f.write(markdown)
+        _atomic_write_text(out, markdown)
     except OSError as e:
         return f'保存失败: {e}', 'error', len(messages)
 
@@ -954,10 +972,8 @@ def analyze_group_range(decrypted_dir: str, chat_id: str, group_name: str,
     markdown = sanitize_analysis_markdown(markdown, group_name)
 
     out = result_path(storage_dir_for(decrypted_dir), chat_id, label)
-    os.makedirs(os.path.dirname(out), exist_ok=True)
     try:
-        with open(out, 'w', encoding='utf-8') as f:
-            f.write(markdown)
+        _atomic_write_text(out, markdown)
     except OSError as e:
         return f'保存失败: {e}', 'error', len(messages)
 

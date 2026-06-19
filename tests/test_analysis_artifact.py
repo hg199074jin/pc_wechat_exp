@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from engine.services.analysis_artifact import (
+    _safe_date,
     artifact_path,
     load_artifact,
     normalize_artifact,
@@ -64,6 +65,42 @@ def test_render_markdown_report_from_artifact():
     assert '### 1. Codex 安装' in md
     assert '> 张三：这个可以做成SOP' in md
     assert '整理安装步骤' in md
+
+
+def test_safe_date_keeps_iso_format():
+    assert _safe_date('2026-06-15') == '2026-06-15'
+    assert _safe_date('2026-06-01_to_2026-06-19') == '2026-06-01_to_2026-06-19'
+
+
+def test_safe_date_neutralises_path_traversal():
+    # Path separators (forward + backslash) must not survive, preventing
+    # ``date`` from escaping its chat directory via ../ or ..\ on Windows.
+    assert '/' not in _safe_date('../../etc/passwd')
+    assert '\\' not in _safe_date('..\\..\\windows\\win')
+    assert _safe_date('') == 'unknown_date'
+
+
+def test_artifact_path_neutralises_traversal_date(tmp_path):
+    path = artifact_path(str(tmp_path), 'c@chatroom', '../../evil')
+    # The filename (last path component) must not contain '..' or separators.
+    filename = os.path.basename(path)
+    assert '..' not in filename
+    assert '/' not in filename
+    assert '\\' not in filename
+
+
+def test_save_artifact_is_atomic_and_loadable(tmp_path):
+    import tempfile
+    artifact = normalize_artifact(
+        {'summary': '原子写测试'},
+        chat_id='c@chatroom', group_name='群', date='2026-06-15', stats={},
+    )
+    path = save_artifact(str(tmp_path), artifact)
+    # No leftover tmp file after a successful write.
+    assert not os.path.isfile(path + '.tmp')
+    loaded = load_artifact(str(tmp_path), 'c@chatroom', '2026-06-15')
+    assert loaded is not None
+    assert loaded['summary'] == '原子写测试'
 
 
 def test_save_and_load_artifact(tmp_path):
