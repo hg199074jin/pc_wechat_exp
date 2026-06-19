@@ -31,3 +31,4 @@ ai_analysis/*
 !ai_analysis/templates/
 !ai_analysis/prompts/.gitkeep
 !ai_analysis/templates/.gitkeep
+.pytest-tmp/
