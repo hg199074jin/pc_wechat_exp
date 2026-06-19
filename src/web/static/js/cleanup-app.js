@@ -180,7 +180,7 @@
       CleanupStore.data.totalBytes = data.total_bytes || 0;
       CleanupStore.data.sampling = data.sampling || {};
       CleanupStore.data.loading = false;
-      document.getElementById('cleanup-total-size').textContent = '预估总占用: ' + formatSize(data.totalBytes);
+      document.getElementById('cleanup-total-size').textContent = '预估总占用: ' + formatSize(data.total_bytes);
       var samplingEl = document.getElementById('cleanup-sampling-info');
       if (samplingEl && data.sampling && data.sampling.sampled > 0) {
         var pct = Math.round(data.sampling.hit_rate * 100);

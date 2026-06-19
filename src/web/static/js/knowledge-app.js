@@ -444,6 +444,10 @@ const KnowledgeApp = {
   },
 
   async runScan() {
+    // Guard against repeated submissions: a slow scan + impatient clicks used
+    // to launch multiple concurrent stream readers that clobbered the UI.
+    if (this._scanning) return;
+    this._scanning = true;
     const chatIds = this._collectSelectedChatIds('scan-tag-picker');
     const dateFrom = document.getElementById('scan-date-from').value;
     const dateTo = document.getElementById('scan-date-to').value;
@@ -455,16 +459,18 @@ const KnowledgeApp = {
     const sourceEl = document.querySelector('input[name="knowledge-source"]:checked');
     const knowledgeSource = sourceEl ? sourceEl.value : 'llm';
 
-    if (!dateFrom || !dateTo) { alert('请选择日期范围'); return; }
-    if (!chatIds.length) { alert('请至少选择一个群聊'); return; }
+    if (!dateFrom || !dateTo) { this._scanning = false; alert('请选择日期范围'); return; }
+    if (!chatIds.length) { this._scanning = false; alert('请至少选择一个群聊'); return; }
 
     this.closeScanModal();
     const progressDiv = document.getElementById('scan-progress');
     const statusEl = document.getElementById('scan-status');
     const barEl = document.getElementById('scan-bar');
+    if (!progressDiv || !statusEl || !barEl) { this._scanning = false; return; }
     progressDiv.style.display = 'block';
     statusEl.textContent = '准备扫描...';
     barEl.style.width = '5%';
+    this._scanReader = null;
 
     try {
       const resp = await fetch('/api/knowledge/run', {
@@ -492,6 +498,7 @@ const KnowledgeApp = {
       }
 
       const reader = resp.body.getReader();
+      this._scanReader = reader;
       const decoder = new TextDecoder();
       let buf = '';
       while (true) {
@@ -522,6 +529,9 @@ const KnowledgeApp = {
       }
     } catch (e) {
       statusEl.textContent = '❌ ' + e.message;
+    } finally {
+      this._scanning = false;
+      this._scanReader = null;
     }
   },
 
@@ -532,10 +542,14 @@ const KnowledgeApp = {
   exportCards(fmt) {
     const activeLi = document.querySelector('#status-nav li.active');
     const status = activeLi ? activeLi.dataset.status : '';
+    const type = document.getElementById('filter-type').value;
+    const q = document.getElementById('knowledge-search').value.trim();
     const minScore = document.getElementById('filter-min-score').value;
     const tagPath = document.getElementById('filter-tag-path')?.value || '';
     const params = new URLSearchParams({ format: fmt });
     if (status) params.set('status', status);
+    if (type) params.set('type', type);
+    if (q) params.set('q', q);
     if (minScore) params.set('min_score', minScore);
     if (tagPath) params.set('tag_path', tagPath);
     window.open('/api/knowledge/export?' + params.toString(), '_blank');

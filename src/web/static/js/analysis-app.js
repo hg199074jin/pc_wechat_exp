@@ -169,7 +169,13 @@ const AnalysisApp = {
       const data = await r.json();
       const cfg = data.llm || {};
       document.getElementById('cfg-base-url').value = cfg.base_url || '';
-      document.getElementById('cfg-api-key').value = cfg.api_key || '';
+      // Never put the masked key back into the input; an empty field means
+      // "leave unchanged", and the placeholder shows the masked value for
+      // reference. This prevents saving the masked string over the real key
+      // (which broke non-'sk-' prefixed keys from 智谱/MiniMax/Kimi/通义).
+      const apiKeyEl = document.getElementById('cfg-api-key');
+      apiKeyEl.value = '';
+      apiKeyEl.placeholder = cfg.api_key ? `${cfg.api_key}（已配置，留空保持不变）` : 'sk-...';
       document.getElementById('cfg-model').value = cfg.model || '';
       document.getElementById('cfg-temperature').value = cfg.temperature || 0.3;
       document.getElementById('cfg-max-tokens').value = cfg.max_tokens || 4096;
@@ -617,7 +623,7 @@ const AnalysisApp = {
       const r = await fetch(`/api/analysis/result/${encodeURIComponent(chatId)}/${date}`);
       if (!r.ok) { target.textContent = '加载失败'; return; }
       const data = await r.json();
-      target.innerHTML = marked.parse(this.sanitizeMarkdown(data.content || '', this._groupName(chatId)));
+      target.innerHTML = this._sanitizeHtml(marked.parse(this.sanitizeMarkdown(data.content || '', this._groupName(chatId))));
     } catch (e) { target.textContent = '加载失败'; }
   },
 
@@ -764,7 +770,7 @@ const AnalysisApp = {
         </div>`;
       container.appendChild(div);
     });
-    container.addEventListener('click', e => {
+    container.onclick = e => {
       const editBtn = e.target.closest('button[data-edit-sched]');
       const delBtn = e.target.closest('button[data-del-sched]');
       if (editBtn) this.openScheduleModal(editBtn.dataset.editSched);
@@ -772,7 +778,7 @@ const AnalysisApp = {
         if (confirm('删除该定时任务？'))
           fetch(`/api/analysis/schedules/${delBtn.dataset.delSched}`, {method: 'DELETE'}).then(() => this.loadSchedules());
       }
-    });
+    };
   },
 
   openScheduleModal(id) {
@@ -924,6 +930,28 @@ const AnalysisApp = {
     const d = document.createElement('div');
     d.textContent = s || '';
     return d.innerHTML;
+  },
+
+  _sanitizeHtml(html) {
+    // LLM-generated Markdown is rendered to HTML and inserted via innerHTML.
+    // Sanitise it (no external CDN dependency — keeps the tool fully offline)
+    // by dropping script/style/iframe/object/embed and stripping on* event
+    // handlers and javascript:/data: URLs that would allow XSS via prompt
+    // injection from analysed group chats.
+    if (!html) return '';
+    const tpl = document.createElement('template');
+    tpl.innerHTML = html;
+    tpl.content.querySelectorAll('script,style,iframe,object,embed,link,meta,base,form').forEach(el => el.remove());
+    tpl.content.querySelectorAll('*').forEach(el => {
+      [...el.attributes].forEach(attr => {
+        const name = attr.name.toLowerCase();
+        const val = (attr.value || '').trim().toLowerCase();
+        if (name.startsWith('on') || val.startsWith('javascript:') || val.startsWith('data:text/html')) {
+          el.removeAttribute(attr.name);
+        }
+      });
+    });
+    return tpl.innerHTML;
   },
 
   _groupName(chatId) {
