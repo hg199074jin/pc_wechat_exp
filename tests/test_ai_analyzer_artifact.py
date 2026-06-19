@@ -211,3 +211,40 @@ def test_repair_exhausts_rounds_and_raises():
         except ValueError as e:
             assert '修复' in str(e)
     assert mock_call.call_count == 2
+
+
+def test_repair_failure_writes_debug_file():
+    """Exhausted JSON repairs should persist raw outputs for debugging."""
+    from engine.services.ai_analyzer import _parse_artifact_json_with_repair
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = {
+            'base_url': 'u',
+            'api_key': 'k',
+            'model': 'm',
+            '_debug_dir': tmp,
+        }
+        with patch('engine.services.ai_analyzer.call_llm',
+                   side_effect=['{"summary": "still bad"', '{"summary": bad}']):
+            try:
+                _parse_artifact_json_with_repair(
+                    '{"summary": "broken"',
+                    cfg,
+                    debug_context={
+                        'group_name': '测试群',
+                        'date': '2026-06-15',
+                        'phase': 'artifact',
+                    },
+                )
+                raise AssertionError('expected ValueError')
+            except ValueError as e:
+                assert '调试文件' in str(e)
+
+        files = os.listdir(tmp)
+        assert len(files) == 1
+        path = os.path.join(tmp, files[0])
+        with open(path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        assert payload['context']['group_name'] == '测试群'
+        assert payload['raw_output'] == '{"summary": "broken"'
+        assert payload['repair_rounds'][0]['raw_output'] == '{"summary": "still bad"'
+        assert payload['repair_rounds'][0]['error']['pos'] is not None

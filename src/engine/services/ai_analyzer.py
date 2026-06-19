@@ -402,6 +402,74 @@ def _llm_timeout(cfg: dict, default: int = DEFAULT_LLM_TIMEOUT) -> int:
     return max(15, min(600, value))
 
 
+def _safe_debug_part(value: str, max_len: int = 80) -> str:
+    """Return a filesystem-safe, readable filename segment."""
+    text = str(value or '').strip()
+    text = ''.join(c if c.isalnum() or c in '-_@.' else '_' for c in text)
+    text = re.sub(r'_+', '_', text).strip('._')
+    return (text or 'unknown')[:max_len]
+
+
+def _json_error_snapshot(error: Exception, text: str, radius: int = 180) -> dict:
+    """Build a compact JSON parse error snapshot with nearby output text."""
+    pos = getattr(error, 'pos', None)
+    snapshot = {
+        'type': error.__class__.__name__,
+        'message': str(error),
+        'lineno': getattr(error, 'lineno', None),
+        'colno': getattr(error, 'colno', None),
+        'pos': pos,
+    }
+    if isinstance(pos, int):
+        source = text or ''
+        start = max(0, pos - radius)
+        end = min(len(source), pos + radius)
+        excerpt = source[start:end]
+        pointer_offset = pos - start
+        snapshot['context'] = excerpt
+        snapshot['pointer'] = ' ' * max(pointer_offset, 0) + '^'
+        snapshot['context_start'] = start
+        snapshot['context_end'] = end
+    return snapshot
+
+
+def _write_artifact_json_debug(cfg: dict, meta: dict, raw: str,
+                               preprocessed: str, first_error: Exception,
+                               repair_rounds: list, final_error: Exception) -> str:
+    """Persist failed LLM JSON output for local debugging.
+
+    The file stays local under ai_analysis/debug and is only written when all
+    parse/repair attempts fail.
+    """
+    debug_dir = cfg.get('_debug_dir')
+    if not debug_dir:
+        return ''
+    os.makedirs(debug_dir, exist_ok=True)
+    context = meta or {}
+    created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    group_part = _safe_debug_part(context.get('group_name') or 'group')
+    date_part = _safe_debug_part(context.get('date') or 'date')
+    phase_part = _safe_debug_part(context.get('phase') or 'artifact')
+    chunk_part = ''
+    if context.get('chunk_index') is not None:
+        chunk_part = f"_chunk{context.get('chunk_index')}"
+    filename = f'{stamp}_{group_part}_{date_part}_{phase_part}{chunk_part}.json'
+    path = os.path.join(debug_dir, filename)
+    payload = {
+        'created_at': created_at,
+        'context': context,
+        'first_error': _json_error_snapshot(first_error, preprocessed),
+        'final_error': _json_error_snapshot(final_error, repair_rounds[-1].get('preprocessed_output', preprocessed) if repair_rounds else preprocessed),
+        'raw_output': raw or '',
+        'preprocessed_output': preprocessed or '',
+        'repair_rounds': repair_rounds,
+    }
+    with open(path, 'w', encoding='utf-8') as f:
+        _json.dump(payload, f, ensure_ascii=False, indent=2)
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Config I/O
 # ---------------------------------------------------------------------------
@@ -540,7 +608,8 @@ def config_path_for(decrypted_dir: str) -> str:
 
 def _call_artifact_llm(group_name: str, date: str, stats: dict,
                        formatted: str, style_prompt: str,
-                       cfg: dict, *, partial: bool = False) -> dict:
+                       cfg: dict, *, partial: bool = False,
+                       chunk_index: int = None) -> dict:
     """Call LLM and parse a normalized artifact."""
     system, user = build_artifact_prompt(
         group_name, date, stats, formatted, style_prompt=style_prompt, partial=partial
@@ -555,8 +624,16 @@ def _call_artifact_llm(group_name: str, date: str, stats: dict,
         timeout=_llm_timeout(cfg),
         proxy=cfg.get('proxy', 'auto'),
     )
+    debug_context = {
+        'group_name': group_name,
+        'date': date,
+        'phase': 'partial_artifact' if partial else 'artifact',
+        'chunk_index': chunk_index,
+        'message_count': stats.get('message_count'),
+        'total_chars': stats.get('total_chars'),
+    }
     try:
-        return _parse_artifact_json_with_repair(raw, cfg)
+        return _parse_artifact_json_with_repair(raw, cfg, debug_context=debug_context)
     except Exception as e:
         raise ValueError(f'LLM 输出不是合法 JSON: {e}')
 
@@ -580,7 +657,8 @@ def _preprocess_llm_json(raw: str) -> str:
     return text
 
 
-def _parse_artifact_json_with_repair(raw: str, cfg: dict) -> dict:
+def _parse_artifact_json_with_repair(raw: str, cfg: dict,
+                                     debug_context: dict = None) -> dict:
     """Parse artifact JSON with regex preprocessing and LLM repair fallback.
 
     Pipeline: regex preprocess -> strict parse -> up to 2 LLM repair rounds.
@@ -592,6 +670,7 @@ def _parse_artifact_json_with_repair(raw: str, cfg: dict) -> dict:
     except Exception as first_error:
         error = first_error
         current = preprocessed
+        repair_rounds = []
         max_repairs = 2
         for attempt in range(max_repairs):
             system = (
@@ -608,7 +687,7 @@ def _parse_artifact_json_with_repair(raw: str, cfg: dict) -> dict:
                 '请只修复 JSON 语法，输出合法 JSON 对象。\n\n'
                 f'{current}'
             )
-            repaired = call_llm(
+            repaired_raw = call_llm(
                 system=system,
                 user=user,
                 base_url=cfg['base_url'],
@@ -619,14 +698,25 @@ def _parse_artifact_json_with_repair(raw: str, cfg: dict) -> dict:
                 timeout=_llm_timeout(cfg),
                 proxy=cfg.get('proxy', 'auto'),
             )
-            repaired = _preprocess_llm_json(repaired)
+            repaired = _preprocess_llm_json(repaired_raw)
             try:
                 return parse_artifact_json(repaired)
             except Exception as repair_error:
+                repair_rounds.append({
+                    'attempt': attempt + 1,
+                    'error': _json_error_snapshot(repair_error, repaired),
+                    'raw_output': repaired_raw,
+                    'preprocessed_output': repaired,
+                })
                 error = repair_error
                 current = repaired
                 continue
-        raise ValueError(f'{first_error}; 修复 {max_repairs} 次后仍失败: {error}')
+        debug_path = _write_artifact_json_debug(
+            cfg, debug_context or {}, raw, preprocessed,
+            first_error, repair_rounds, error
+        )
+        suffix = f'；调试文件: {debug_path}' if debug_path else ''
+        raise ValueError(f'{first_error}; 修复 {max_repairs} 次后仍失败: {error}{suffix}')
 
 
 def _rollup_artifacts(group_name: str, date: str, stats: dict,
@@ -657,8 +747,16 @@ def _rollup_artifacts(group_name: str, date: str, stats: dict,
         timeout=_llm_timeout(cfg),
         proxy=cfg.get('proxy', 'auto'),
     )
+    debug_context = {
+        'group_name': group_name,
+        'date': date,
+        'phase': 'rollup_artifact',
+        'message_count': stats.get('message_count'),
+        'total_chars': stats.get('total_chars'),
+        'chunks': len(partial_artifacts or []),
+    }
     try:
-        return _parse_artifact_json_with_repair(raw, cfg)
+        return _parse_artifact_json_with_repair(raw, cfg, debug_context=debug_context)
     except Exception as e:
         raise ValueError(f'LLM 输出不是合法 JSON: {e}')
 
@@ -673,7 +771,8 @@ def analyze_group(decrypted_dir: str, chat_id: str, group_name: str,
     error, message is the reason shown to the user.
     """
     cfg_path = config_path or config_path_for(decrypted_dir)
-    cfg = load_llm_config(cfg_path)
+    cfg = dict(load_llm_config(cfg_path) or {})
+    cfg['_debug_dir'] = os.path.join(storage_dir_for(decrypted_dir), 'debug')
 
     if not cfg.get('base_url') or not cfg.get('api_key') or not cfg.get('model'):
         return 'LLM 未配置', 'error', 0
@@ -717,9 +816,10 @@ def analyze_group(decrypted_dir: str, chat_id: str, group_name: str,
             stats['chunked'] = True
             stats['chunks'] = len(chunks)
             partials = []
-            for chunk in chunks:
+            for idx, chunk in enumerate(chunks, start=1):
                 partials.append(_call_artifact_llm(
-                    group_name, date, stats, chunk, style_prompt, cfg, partial=True
+                    group_name, date, stats, chunk, style_prompt, cfg,
+                    partial=True, chunk_index=idx
                 ))
             artifact_data = _rollup_artifacts(group_name, date, stats, partials, style_prompt, cfg)
         else:
@@ -770,7 +870,8 @@ def analyze_group_range(decrypted_dir: str, chat_id: str, group_name: str,
     """Analyze one group for a date range and save it under a range label."""
     label = period_label(start_date, end_date)
     cfg_path = config_path or config_path_for(decrypted_dir)
-    cfg = load_llm_config(cfg_path)
+    cfg = dict(load_llm_config(cfg_path) or {})
+    cfg['_debug_dir'] = os.path.join(storage_dir_for(decrypted_dir), 'debug')
 
     if not cfg.get('base_url') or not cfg.get('api_key') or not cfg.get('model'):
         return 'LLM 未配置', 'error', 0
@@ -816,9 +917,10 @@ def analyze_group_range(decrypted_dir: str, chat_id: str, group_name: str,
             stats['chunked'] = True
             stats['chunks'] = len(chunks)
             partials = []
-            for chunk in chunks:
+            for idx, chunk in enumerate(chunks, start=1):
                 partials.append(_call_artifact_llm(
-                    group_name, label, stats, chunk, style_prompt, cfg, partial=True
+                    group_name, label, stats, chunk, style_prompt, cfg,
+                    partial=True, chunk_index=idx
                 ))
             artifact_data = _rollup_artifacts(group_name, label, stats, partials, style_prompt, cfg)
         else:
