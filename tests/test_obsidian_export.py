@@ -13,8 +13,10 @@ from engine.services.obsidian_export import (
     _render_frontmatter,
     _render_card_body,
     sync_cards_to_vault,
+    sync_agent_rules_to_vault,
     find_vault_files,
     TYPE_DIR_MAP,
+    RULE_EXPORT_MARKER,
 )
 
 
@@ -229,3 +231,97 @@ def test_find_vault_files_recognises_exported_notes():
         found = find_vault_files(vault)
         assert len(found) == 1
         assert found[0]['updated_at'] == 1718400000
+
+
+# ---------------------------------------------------------------------------
+# Agent-rule sync (Task 4)
+# ---------------------------------------------------------------------------
+
+def _rule(**overrides):
+    base = {
+        'id': 'r1a2b3c4-aaaa-bbbb-cccc-dddddddddddd',
+        'source_card_id': 'card-1',
+        'derivative_id': None,
+        'title': '拆分大任务为子任务',
+        'category': 'engineering',
+        'content_md': '当一个任务涉及超过3个文件时，先拆成子任务再执行。',
+        'status': 'published',
+        'target_scope': 'shared',
+        'target_project': '',
+        'target_path': '',
+        'version': 1,
+        'created_at': 1718400000,
+        'updated_at': 1718400000,
+        'published_at': 1718400000,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_sync_published_rule_writes_to_published_dir():
+    with tempfile.TemporaryDirectory() as vault:
+        result = sync_agent_rules_to_vault([_rule()], vault)
+        assert result['written'] == 1
+        path = os.path.join(vault, '30_AI可调用', 'published', '拆分大任务为子任务__r1a2b3c4.md')
+        assert os.path.isfile(path)
+        with open(path, encoding='utf-8') as f:
+            content = f.read()
+        assert content.startswith('---')
+        assert f'wechat_exp: "{RULE_EXPORT_MARKER}"' in content
+        assert 'status: published' in content
+        assert 'source_card_id: card-1' in content
+        assert '当一个任务涉及超过3个文件' in content
+
+
+def test_sync_draft_rule_writes_to_drafts_dir():
+    with tempfile.TemporaryDirectory() as vault:
+        sync_agent_rules_to_vault([_rule(status='draft', published_at=None)], vault)
+        path = os.path.join(vault, '30_AI可调用', 'drafts', '拆分大任务为子任务__r1a2b3c4.md')
+        assert os.path.isfile(path)
+
+
+def test_sync_generates_index():
+    with tempfile.TemporaryDirectory() as vault:
+        sync_agent_rules_to_vault([_rule(), _rule(id='e2f3g4h5-aaaa', title='另一条规则')], vault)
+        idx = os.path.join(vault, '30_AI可调用', 'INDEX.md')
+        assert os.path.isfile(idx)
+        with open(idx, encoding='utf-8') as f:
+            idx_content = f.read()
+        assert '拆分大任务为子任务' in idx_content
+        assert '另一条规则' in idx_content
+
+
+def test_sync_skips_unchanged_rule():
+    rule = _rule()
+    with tempfile.TemporaryDirectory() as vault:
+        first = sync_agent_rules_to_vault([rule], vault)
+        assert first['written'] == 1
+        second = sync_agent_rules_to_vault([rule], vault)
+        assert second['written'] == 0
+        assert second['skipped'] == 1
+
+
+def test_sync_rewrites_when_updated_at_changes():
+    with tempfile.TemporaryDirectory() as vault:
+        sync_agent_rules_to_vault([_rule(updated_at=1718400000)], vault)
+        result = sync_agent_rules_to_vault([_rule(updated_at=1718400500, version=2)], vault)
+        assert result['written'] == 1
+        path = os.path.join(vault, '30_AI可调用', 'published', '拆分大任务为子任务__r1a2b3c4.md')
+        with open(path, encoding='utf-8') as f:
+            assert 'updated_at: 1718400500' in f.read()
+
+
+def test_sync_no_vault_returns_error():
+    result = sync_agent_rules_to_vault([_rule()], '')
+    assert result['written'] == 0
+    assert result['errors']
+
+
+def test_sync_empty_list_does_not_delete_existing():
+    with tempfile.TemporaryDirectory() as vault:
+        sync_agent_rules_to_vault([_rule()], vault)
+        path = os.path.join(vault, '30_AI可调用', 'published', '拆分大任务为子任务__r1a2b3c4.md')
+        assert os.path.isfile(path)
+        # Empty sync must not remove the previously written file.
+        sync_agent_rules_to_vault([], vault)
+        assert os.path.isfile(path)

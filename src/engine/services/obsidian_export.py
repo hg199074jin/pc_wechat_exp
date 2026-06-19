@@ -303,3 +303,134 @@ def find_vault_files(vault_path: str) -> List[dict]:
                 continue  # not one of ours (no updated_at frontmatter)
             results.append({'path': full, 'updated_at': updated})
     return results
+
+
+# ---------------------------------------------------------------------------
+# Agent-rule sync (Task 4)
+# ---------------------------------------------------------------------------
+
+RULE_EXPORT_MARKER = 'agent-rule-export'
+
+
+def _atomic_write_text(path: str, content: str) -> None:
+    """Write text atomically (.tmp + os.replace), creating parent dirs."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(content)
+    os.replace(tmp, path)
+
+
+def _rule_filename(rule: dict) -> str:
+    return _safe_filename(rule.get('title') or '', rule.get('id') or '')
+
+
+def _rule_subdir(rule: dict) -> str:
+    """Draft rules go to drafts/, published to published/."""
+    return 'published' if rule.get('status') == 'published' else 'drafts'
+
+
+def _render_rule_frontmatter(rule: dict) -> str:
+    """YAML frontmatter for an agent-rule file."""
+    published_at = rule.get('published_at')
+    lines = [
+        '---',
+        f'id: {_yaml_escape(rule.get("id") or "")}',
+        f'category: {_yaml_escape(rule.get("category") or "general")}',
+        f'status: {_yaml_escape(rule.get("status") or "draft")}',
+        f'source_card_id: {_yaml_escape(rule.get("source_card_id") or "")}',
+        f'target_scope: {_yaml_escape(rule.get("target_scope") or "shared")}',
+        f'version: {int(rule.get("version") or 1)}',
+        f'updated_at: {int(rule.get("updated_at") or 0)}',
+        f'published_at: {int(published_at) if published_at else 0}',
+        f'wechat_exp: "{RULE_EXPORT_MARKER}"',
+        '---',
+    ]
+    return '\n'.join(lines)
+
+
+def _render_rule_body(rule: dict) -> str:
+    """Markdown body for an agent-rule file."""
+    title = (rule.get('title') or '未命名规则').strip()
+    parts = [f'# {title}', '']
+    meta = []
+    if rule.get('category'):
+        meta.append(f'**分类:** {rule["category"]}')
+    if rule.get('version'):
+        meta.append(f'**版本:** v{rule["version"]}')
+    if rule.get('source_card_id'):
+        meta.append(f'**来源卡片:** `{rule["source_card_id"]}`')
+    if meta:
+        parts.append(' | '.join(meta))
+        parts.append('')
+    parts.append(rule.get('content_md') or '（规则正文为空）')
+    parts.append('')
+    return '\n'.join(parts).rstrip() + '\n'
+
+
+def _render_rules_index(rules: list) -> str:
+    """Generate INDEX.md listing all synced rules."""
+    lines = ['# AI 可调用规则索引', '',
+             '> 由 WeChat EXP 知识沉淀雷达自动生成。本文件是导航文档，'
+             '非真源——规则的真源在 knowledge.db。', '',
+             '在其他项目的 AGENTS.md 里引用本目录，或复制相关段落。', '']
+    published = [r for r in rules if r.get('status') == 'published']
+    drafts = [r for r in rules if r.get('status') != 'published']
+    if published:
+        lines.append('## 已发布规则')
+        for r in published:
+            lines.append(f"- [{r.get('title') or '未命名'}](published/{_rule_filename(r)}) — {r.get('category', 'general')}")
+        lines.append('')
+    if drafts:
+        lines.append('## 草案（未发布，仅供参考）')
+        for r in drafts:
+            lines.append(f"- [{r.get('title') or '未命名'}](drafts/{_rule_filename(r)}) — {r.get('category', 'general')}")
+        lines.append('')
+    return '\n'.join(lines)
+
+
+def sync_agent_rules_to_vault(rules: list, vault_path: str) -> dict:
+    """Incrementally sync agent rules into vault/30_AI可调用/.
+
+    Published rules -> published/, others -> drafts/. Uses updated_at to skip
+    unchanged files. Regenerates INDEX.md each run. Never deletes files.
+    Returns {'written': N, 'skipped': N, 'errors': [...]}.
+    """
+    written = 0
+    skipped = 0
+    errors: List[str] = []
+
+    if not vault_path:
+        return {'written': 0, 'skipped': 0, 'errors': ['未配置 Obsidian vault 路径']}
+    base_dir = os.path.join(vault_path, '30_AI可调用')
+    try:
+        os.makedirs(base_dir, exist_ok=True)
+    except OSError as e:
+        return {'written': 0, 'skipped': 0, 'errors': [f'无法创建 vault 目录: {e}']}
+
+    for rule in rules or []:
+        try:
+            subdir = _rule_subdir(rule)
+            filename = _rule_filename(rule)
+            dir_path = os.path.join(base_dir, subdir)
+            file_path = os.path.join(dir_path, filename)
+
+            existing = _read_existing_updated_at(file_path)
+            if existing is not None and existing == int(rule.get('updated_at') or 0):
+                skipped += 1
+                continue
+
+            content = (_render_rule_frontmatter(rule) + '\n\n'
+                       + _render_rule_body(rule))
+            _atomic_write_text(file_path, content)
+            written += 1
+        except Exception as e:  # pragma: no cover - defensive
+            errors.append(f'{rule.get("id") or "?"}: {e}')
+
+    # Always regenerate the navigation index.
+    try:
+        _atomic_write_text(os.path.join(base_dir, 'INDEX.md'), _render_rules_index(rules or []))
+    except Exception as e:  # pragma: no cover - defensive
+        errors.append(f'INDEX.md: {e}')
+
+    return {'written': written, 'skipped': skipped, 'errors': errors}
