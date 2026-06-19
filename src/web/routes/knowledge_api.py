@@ -136,8 +136,15 @@ def update_card_api(card_id):
 
 @knowledge_bp.route('/cards/<card_id>', methods=['DELETE'])
 def delete_card_api(card_id):
-    if not store.delete_card(_db_path(), card_id):
-        return jsonify({'error': 'not found'}), 404
+    try:
+        if not store.delete_card(_db_path(), card_id):
+            return jsonify({'error': 'not found'}), 404
+    except store.CardHasRulesError as e:
+        # A published rule may still be in use; surface a clear conflict.
+        return jsonify({
+            'error': f'该卡片仍有 {e.rule_count} 条 agent 规则，请先归档规则再删除',
+            'rule_count': e.rule_count,
+        }), 409
     return jsonify({'ok': True})
 
 
@@ -159,6 +166,13 @@ def bulk_cards_api():
 
 @knowledge_bp.route('/cards/<card_id>/convert', methods=['POST'])
 def convert_card_api(card_id):
+    """Convert a card into a structured derivative (does NOT overwrite the card).
+
+    Returns an explicit contract: source_card_id, derivative_id, derivative,
+    and card_unchanged=true. The original card's content_md/type are never
+    modified by conversion. Task 6 updates the client to refresh the
+    derivative section in the detail modal.
+    """
     data = request.get_json(silent=True) or {}
     target_type = data.get('target_type') or ''
     valid = {'audit_case', 'sop', 'prompt', 'faq', 'article', 'script'}
@@ -177,14 +191,160 @@ def convert_card_api(card_id):
     try:
         system, user = extractor.build_convert_prompt(card, target_type)
         md = llm_call(system, user)
-        # Update card with converted content
-        store.update_card(_db_path(), card_id, {
-            'content_md': md,
-            'type': target_type,
+        # Create an immutable derivative instead of overwriting the card.
+        deriv_id = store.create_derivative(
+            _db_path(), card_id, target_type, card.get('title', ''), md,
+        )
+        derivative = store.get_derivative(_db_path(), deriv_id)
+        return jsonify({
+            'ok': True,
+            'source_card_id': card_id,
+            'derivative_id': deriv_id,
+            'derivative': derivative,
+            'card_unchanged': True,
         })
-        return jsonify({'ok': True, 'content_md': md, 'type': target_type})
     except Exception as e:
         return jsonify({'error': f'转化失败: {e}'}), 500
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle, my-version derivative, agent rules (Task 5)
+# ---------------------------------------------------------------------------
+
+@knowledge_bp.route('/cards/<card_id>/lifecycle', methods=['POST'])
+def set_lifecycle_api(card_id):
+    """Set the card's lifecycle_stage (independent of review status)."""
+    data = request.get_json(silent=True) or {}
+    stage = data.get('lifecycle_stage') or ''
+    if stage not in store.LIFECYCLE_STAGES:
+        return jsonify({'error': f'lifecycle_stage must be one of {sorted(store.LIFECYCLE_STAGES)}'}), 400
+    if not store.update_card(_db_path(), card_id, {'lifecycle_stage': stage}):
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'ok': True, 'lifecycle_stage': stage})
+
+
+@knowledge_bp.route('/cards/<card_id>/my-version', methods=['POST'])
+def create_my_version_api(card_id):
+    """Generate a 'my version' derivative via LLM and store it (immutable)."""
+    card = store.get_card(_db_path(), card_id)
+    if not card:
+        return jsonify({'error': 'not found'}), 404
+    try:
+        llm_call = extractor.make_llm_call(_config_path())
+    except RuntimeError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
+        system, user = extractor.build_my_version_prompt(card)
+        md = llm_call(system, user)
+        deriv_id = store.create_derivative(
+            _db_path(), card_id, 'my_version', f"我的版本：{card.get('title', '')}", md,
+        )
+        return jsonify({
+            'ok': True,
+            'source_card_id': card_id,
+            'derivative_id': deriv_id,
+            'derivative': store.get_derivative(_db_path(), deriv_id),
+            'card_unchanged': True,
+        })
+    except Exception as e:
+        return jsonify({'error': f'生成失败: {e}'}), 500
+
+
+@knowledge_bp.route('/cards/<card_id>/derivatives')
+def list_derivatives_api(card_id):
+    """List all derivatives (my_version + structured rewrites) for a card."""
+    derivs = store.list_derivatives(_db_path(), card_id)
+    return jsonify({'derivatives': derivs})
+
+
+@knowledge_bp.route('/cards/<card_id>/agent-rules/draft', methods=['POST'])
+def draft_agent_rule_api(card_id):
+    """Generate an agent-rule draft from a card (+ optional my_version)."""
+    card = store.get_card(_db_path(), card_id)
+    if not card:
+        return jsonify({'error': 'not found'}), 404
+    data = request.get_json(silent=True) or {}
+    derivative = None
+    deriv_id = data.get('derivative_id')
+    if deriv_id:
+        derivative = store.get_derivative(_db_path(), deriv_id)
+    try:
+        llm_call = extractor.make_llm_call(_config_path())
+    except RuntimeError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
+        system, user = extractor.build_agent_rule_prompt(card, derivative)
+        raw = llm_call(system, user)
+        draft = extractor.parse_agent_rule_draft(raw)
+    except ValueError as e:
+        return jsonify({'error': f'草案解析失败: {e}'}), 500
+    except Exception as e:
+        return jsonify({'error': f'生成失败: {e}'}), 500
+    rule_id = store.create_agent_rule(
+        _db_path(), card_id, derivative_id=deriv_id,
+        title=draft['title'], category=draft['category'], content_md=draft['content_md'],
+    )
+    return jsonify({'ok': True, 'rule': store.get_agent_rule(_db_path(), rule_id)})
+
+
+@knowledge_bp.route('/cards/<card_id>/agent-rules')
+def list_card_agent_rules_api(card_id):
+    rules = store.list_agent_rules(_db_path(), source_card_id=card_id)
+    return jsonify({'rules': rules})
+
+
+@knowledge_bp.route('/agent-rules/<rule_id>', methods=['PUT'])
+def update_agent_rule_api(rule_id):
+    data = request.get_json(silent=True) or {}
+    allowed = {'title', 'category', 'content_md', 'target_scope',
+               'target_project', 'target_path'}
+    updates = {k: v for k, v in data.items() if k in allowed}
+    if not store.update_agent_rule(_db_path(), rule_id, updates):
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'ok': True, 'rule': store.get_agent_rule(_db_path(), rule_id)})
+
+
+@knowledge_bp.route('/agent-rules/<rule_id>/publish', methods=['POST'])
+def publish_agent_rule_api(rule_id):
+    try:
+        rule = store.publish_agent_rule(_db_path(), rule_id)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    if not rule:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'ok': True, 'rule': rule})
+
+
+@knowledge_bp.route('/agent-rules/<rule_id>/archive', methods=['POST'])
+def archive_agent_rule_api(rule_id):
+    if not store.archive_agent_rule(_db_path(), rule_id):
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'ok': True})
+
+
+@knowledge_bp.route('/agent-rules/stats')
+def agent_rule_stats_api():
+    return jsonify(store.get_agent_rule_stats(_db_path()))
+
+
+@knowledge_bp.route('/sync-agent-rules', methods=['POST'])
+def sync_agent_rules_api():
+    """Sync published + draft rules into the configured vault (incremental)."""
+    from engine.config_file import get_obsidian_vault_path
+    from engine.services.obsidian_export import sync_agent_rules_to_vault
+
+    vault_path = get_obsidian_vault_path()
+    if not vault_path:
+        return jsonify({'error': '请先配置 Obsidian vault 路径'}), 400
+    rules = store.list_agent_rules(_db_path())
+    result = sync_agent_rules_to_vault(rules, vault_path)
+    return jsonify({
+        'vault_path': vault_path,
+        'rule_count': len(rules),
+        'written': result.get('written', 0),
+        'skipped': result.get('skipped', 0),
+        'errors': result.get('errors') or [],
+    })
 
 
 # ---------------------------------------------------------------------------
