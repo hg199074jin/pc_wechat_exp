@@ -517,7 +517,11 @@ const KnowledgeApp = {
             } else if (ev.stage === 'done') {
               const reused = ev.result?.reused_artifacts || 0;
               const suffix = reused ? `，复用 ${reused} 个 AI 分析结果` : '';
-              statusEl.textContent = `✅ 完成！${ev.result?.card_count || 0} 条知识卡片${suffix}`;
+              const warnings = ev.result?.warnings || [];
+              const warningSuffix = warnings.length
+                ? `，${warnings.length} 个分块因 LLM 格式异常已跳过：${warnings[0]}`
+                : '';
+              statusEl.textContent = `✅ 完成！${ev.result?.card_count || 0} 条知识卡片${suffix}${warningSuffix}`;
               barEl.style.width = '100%';
               this.loadCards();
               this.loadStats();

@@ -285,6 +285,7 @@ def run_knowledge_scan():
         total_cards = 0
         reused_artifacts = 0
         llm_call = None
+        scan_warnings = []
 
         def get_llm_call():
             nonlocal llm_call
@@ -338,6 +339,8 @@ def run_knowledge_scan():
                         cards = extractor.extract_cards_from_messages(
                             messages, cname, date, get_llm_call(),
                             min_score=min_score, domain=domain,
+                            error_cb=lambda reason, cname=cname, date=date:
+                                scan_warnings.append(f'跳过 {cname} ({date}): {reason}'),
                         )
                         total_candidates += len(cards)
                         total_cards += _save_scan_cards(dbp, cards, cid, max_cards)
@@ -380,6 +383,8 @@ def run_knowledge_scan():
                     cards = extractor.extract_cards_from_messages_chunked(
                         messages, cname, label, get_llm_call(),
                         min_score=min_score, domain=domain,
+                        error_cb=lambda reason, cname=cname, label=label:
+                            scan_warnings.append(f'跳过 {cname} ({label}): {reason}'),
                     )
                     total_candidates += len(cards)
                     total_cards += _save_scan_cards(dbp, cards, cid, max_cards)
@@ -397,6 +402,7 @@ def run_knowledge_scan():
                 'candidate_count': total_candidates,
                 'card_count': total_cards,
                 'reused_artifacts': reused_artifacts,
+                'warnings': scan_warnings,
             })
         except Exception as e:
             store.finish_run(dbp, run_id, status='error', error=str(e))

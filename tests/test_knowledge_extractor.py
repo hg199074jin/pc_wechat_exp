@@ -41,6 +41,11 @@ def test_parse_llm_cards_strips_markdown_fence():
     assert cards[0]['title'] == 'T'
 
 
+def test_parse_llm_cards_strips_reasoning_before_json():
+    raw = '<think>先检查字段</think>\n{"cards":[]}'
+    assert parse_llm_cards(raw, min_score=0) == []
+
+
 def test_parse_llm_cards_normalizes_type():
     raw = json.dumps({"cards": [
         {"title": "X", "type": "unknown_type", "score": 80, "summary": "", "why_valuable": "", "content_md": "", "tags": [], "source_msg_ids": []}
@@ -132,6 +137,42 @@ def test_extract_cards_with_fake_llm():
     assert len(cards[0]['sources']) == 1
     assert cards[0]['sources'][0]['msg_id'] == 1
     assert cards[0]['sources'][0]['chat_name'] == 'AI审计'
+
+
+def test_extract_cards_repairs_malformed_json_once():
+    messages = [{'id': 1, 'create_time': 100, 'sender_name': 'A', 'content': '可复用SOP'}]
+    repaired = json.dumps({'cards': [{
+        'title': '修复后卡片', 'type': 'sop', 'score': 90,
+        'summary': 's', 'why_valuable': 'w', 'content_md': 'c',
+        'tags': [], 'source_msg_ids': [1],
+    }]})
+    calls = []
+
+    def fake_llm(system, user):
+        calls.append((system, user))
+        return '{"cards":[' if len(calls) == 1 else repaired
+
+    cards = extract_cards_from_messages(messages, '测试群', '2026-06-15', fake_llm)
+    assert [card['title'] for card in cards] == ['修复后卡片']
+    assert len(calls) == 2
+
+
+def test_extract_cards_skips_reasoning_only_repair_and_reports_error():
+    messages = [{'id': 1, 'create_time': 100, 'sender_name': 'A', 'content': '可复用SOP'}]
+    errors = []
+    calls = []
+
+    def fake_llm(system, user):
+        calls.append((system, user))
+        return '{"cards":[' if len(calls) == 1 else '<think>只输出推理</think>'
+
+    cards = extract_cards_from_messages(
+        messages, '测试群', '2026-06-15', fake_llm, error_cb=errors.append
+    )
+    assert cards == []
+    assert len(calls) == 2
+    assert len(errors) == 1
+    assert '仅包含推理文本' in errors[0]
 
 
 def test_extract_cards_empty_messages():
@@ -243,3 +284,35 @@ def test_extract_cards_from_messages_chunked_dedupes_large_inputs():
     assert len(cards) == 1
     assert cards[0]['date'] == '2026-06-01_to_2026-06-19'
     assert len(cards[0]['sources']) >= 1
+
+
+def test_chunked_extraction_keeps_successful_chunks_when_one_chunk_has_bad_json():
+    messages = []
+    for i in range(20):
+        messages.append({
+            'id': i,
+            'create_time': i,
+            'sender_name': 'A',
+            'content': 'x' * 700,
+        })
+    calls = []
+    errors = []
+
+    def fake_llm(system, user):
+        calls.append((system, user))
+        if len(calls) == 1:
+            return '{"cards":['
+        if len(calls) == 2:
+            return '<think>只输出推理</think>'
+        return json.dumps({'cards': [{
+            'title': '后续分块知识', 'type': 'note', 'score': 90,
+            'summary': 's', 'why_valuable': 'w', 'content_md': 'c',
+            'tags': [], 'source_msg_ids': [10],
+        }]})
+
+    cards = extract_cards_from_messages_chunked(
+        messages, '测试群', '2026-06-01_to_2026-06-19', fake_llm,
+        min_score=0, error_cb=errors.append,
+    )
+    assert [card['title'] for card in cards] == ['后续分块知识']
+    assert errors

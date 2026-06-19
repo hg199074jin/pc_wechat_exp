@@ -5,7 +5,7 @@ import json
 import re
 import html
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from engine.services import ai_analyzer
 
@@ -50,7 +50,7 @@ DOMAIN_LABELS = {
 
 def _extract_json_object(text: str) -> str:
     """Best-effort extract a JSON object from LLM output."""
-    s = (text or '').strip()
+    s = ai_analyzer._preprocess_llm_json(text)
     if s.startswith('```'):
         s = re.sub(r'^```(?:json)?\s*', '', s)
         s = re.sub(r'\s*```$', '', s)
@@ -74,7 +74,10 @@ def parse_llm_cards(raw: str, min_score: int = 70) -> List[Dict]:
     result = []
     for card in cards:
         title = (card.get('title') or '').strip()
-        score = int(card.get('score') or 0)
+        try:
+            score = int(card.get('score') or 0)
+        except (TypeError, ValueError):
+            continue
         if not title or score < min_score:
             continue
         ctype = card.get('type') or 'note'
@@ -91,6 +94,30 @@ def parse_llm_cards(raw: str, min_score: int = 70) -> List[Dict]:
             'source_msg_ids': card.get('source_msg_ids') if isinstance(card.get('source_msg_ids'), list) else [],
         })
     return result
+
+
+def _parse_llm_cards_with_repair(raw: str, min_score: int, llm_call) -> List[Dict]:
+    """Parse knowledge cards, with one repair attempt for malformed JSON."""
+    try:
+        return parse_llm_cards(raw, min_score=min_score)
+    except (ValueError, json.JSONDecodeError) as first_error:
+        system = """你是严格的 JSON 修复器。只输出修复后的合法 JSON 对象。
+不要输出思考、解释、Markdown、代码块或 <think> 标签。
+保持卡片字段和值不变，只修复 JSON 语法。输出必须以 { 开头、以 } 结尾。"""
+        user = (
+            f'下面内容应是知识卡 JSON，但解析失败：{first_error}\n'
+            '请只修复 JSON 语法，输出单个合法 JSON 对象。\n\n'
+            f'{ai_analyzer._preprocess_llm_json(raw)}'
+        )
+        repaired_raw = llm_call(system, user)
+        if ai_analyzer._is_reasoning_only_response(repaired_raw):
+            raise ValueError('LLM 修复响应仅包含推理文本，未返回 JSON')
+        try:
+            return parse_llm_cards(repaired_raw, min_score=min_score)
+        except (ValueError, json.JSONDecodeError) as repair_error:
+            raise ValueError(
+                f'知识卡 JSON 解析失败: {first_error}; 修复后仍失败: {repair_error}'
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +326,7 @@ def extract_cards_from_messages_chunked(
     *,
     min_score: int = 70,
     domain: str = 'general',
+    error_cb: Optional[Callable[[str], None]] = None,
 ) -> List[Dict]:
     """Extract knowledge cards, chunking long date ranges before LLM calls."""
     text = format_messages_for_knowledge(messages)
@@ -307,17 +335,20 @@ def extract_cards_from_messages_chunked(
     if len(text) <= KNOWLEDGE_CHUNK_CHAR_THRESHOLD:
         return extract_cards_from_messages(
             messages, chat_name, date, llm_call,
-            min_score=min_score, domain=domain,
+            min_score=min_score, domain=domain, error_cb=error_cb,
         )
 
     chunks = _chunk_messages_for_knowledge(messages)
     if len(chunks) > MAX_KNOWLEDGE_CHUNKS:
         chunks = chunks[-MAX_KNOWLEDGE_CHUNKS:]
     cards = []
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks, start=1):
+        def _chunk_error(reason, index=index, total=len(chunks)):
+            if error_cb:
+                error_cb(f'分块 {index}/{total}: {reason}')
         cards.extend(extract_cards_from_messages(
             chunk, chat_name, date, llm_call,
-            min_score=min_score, domain=domain,
+            min_score=min_score, domain=domain, error_cb=_chunk_error,
         ))
     return dedupe_knowledge_cards(cards)
 
@@ -330,6 +361,7 @@ def extract_cards_from_messages(
     *,
     min_score: int = 70,
     domain: str = 'general',
+    error_cb: Optional[Callable[[str], None]] = None,
 ) -> List[Dict]:
     """Extract knowledge cards from messages using LLM.
 
@@ -350,7 +382,12 @@ def extract_cards_from_messages(
 
     system, user = build_knowledge_prompt(domain, min_score, text)
     raw = llm_call(system, user)
-    parsed = parse_llm_cards(raw, min_score=min_score)
+    try:
+        parsed = _parse_llm_cards_with_repair(raw, min_score, llm_call)
+    except ValueError as e:
+        if error_cb:
+            error_cb(str(e))
+        return []
 
     by_id = {}
     for m in messages:
