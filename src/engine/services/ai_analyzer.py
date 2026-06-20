@@ -122,8 +122,8 @@ def format_messages_for_llm(messages: List[Dict]) -> str:
 
     total = len(lines)
     if total > MAX_MSG_PER_GROUP:
-        lines = lines[:MAX_MSG_PER_GROUP]
-        lines.append(f'\n(共 {total} 条消息, 已截断到最近 {MAX_MSG_PER_GROUP} 条)')
+        lines = lines[-MAX_MSG_PER_GROUP:]
+        lines.insert(0, f'(共 {total} 条消息, 已截断到最近 {MAX_MSG_PER_GROUP} 条)\n')
 
     return '\n'.join(lines)
 
@@ -143,8 +143,8 @@ def format_messages_for_artifact(messages: List[Dict]) -> str:
 
     total = len(lines)
     if total > MAX_MSG_PER_GROUP:
-        lines = lines[:MAX_MSG_PER_GROUP]
-        lines.append(f'\n(共 {total} 条消息, 已截断到最近 {MAX_MSG_PER_GROUP} 条)')
+        lines = lines[-MAX_MSG_PER_GROUP:]
+        lines.insert(0, f'(共 {total} 条消息, 已截断到最近 {MAX_MSG_PER_GROUP} 条)\n')
     return '\n'.join(lines)
 
 
@@ -367,10 +367,10 @@ def call_llm(system: str, user: str, base_url: str, api_key: str,
             if resp.status_code == 200:
                 data = resp.json()
                 return data['choices'][0]['message']['content']
-            if 500 <= resp.status_code < 600 and attempt < max_attempts - 1:
+            if (resp.status_code == 429 or 500 <= resp.status_code < 600) and attempt < max_attempts - 1:
                 last_err = RuntimeError(
                     f'LLM API error {resp.status_code}: {resp.text[:300]}')
-                _time.sleep(0.5 * (attempt + 1))
+                _time.sleep(1.0 * (attempt + 1))  # longer backoff for rate limits
                 continue
             raise RuntimeError(f'LLM API error {resp.status_code}: {resp.text[:300]}')
         except requests.Timeout as e:
@@ -668,10 +668,10 @@ def _preprocess_llm_json(raw: str) -> str:
     text = _strip_reasoning_blocks(raw)
     # Strip /* block comments */.
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
-    # Strip // line comments (only when not inside a string — cheap heuristic:
-    # only remove when the rest of the line does not look quoted). We keep it
-    # simple and remove //... to end of line, which is the common LLM pattern.
-    text = re.sub(r'(^|[^:])//.*$', lambda m: m.group(1), text, flags=re.MULTILINE)
+    # Strip // line comments — heuristic: only when preceded by JSON structural
+    # characters (comma, colon, bracket, brace, whitespace) or start-of-line.
+    # This avoids stripping // inside string values (e.g. URLs, code snippets).
+    text = re.sub(r'(?<=[{[\],:\s])//.*$', '', text, flags=re.MULTILINE)
     # Remove trailing commas before } or ].
     text = re.sub(r',\s*([}\]])', r'\1', text)
     return text

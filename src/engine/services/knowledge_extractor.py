@@ -17,6 +17,8 @@ CARD_TYPES = {
 KNOWLEDGE_CHUNK_CHAR_THRESHOLD = 12000
 KNOWLEDGE_CHUNK_CHAR_SIZE = 6000
 MAX_KNOWLEDGE_CHUNKS = 8
+KNOWLEDGE_JSON_RETRY_MAX_DEPTH = 3
+KNOWLEDGE_JSON_RETRY_MIN_MESSAGES = 2
 
 
 def readable_message_text(content: str) -> str:
@@ -61,18 +63,20 @@ def _extract_json_object(text: str) -> str:
             _, end = json.JSONDecoder().raw_decode(candidate)
             return candidate[:end]
         except json.JSONDecodeError:
-            end = candidate.rfind('}')
-            if end >= 0:
-                return candidate[:end + 1]
+            # rfind fallback removed — it truncates at wrong } inside strings.
+            # Let the caller handle the malformed JSON via repair loop.
+            pass
     return s
 
 
-def parse_llm_cards(raw: str, min_score: int = 70) -> List[Dict]:
-    """Parse LLM JSON output into a list of validated card dicts."""
-    data = json.loads(_extract_json_object(raw))
-    cards = data.get('cards', [])
+def _validate_llm_cards(cards: object, min_score: int) -> List[Dict]:
+    """Validate raw card objects without requiring their enclosing JSON."""
+    if not isinstance(cards, list):
+        return []
     result = []
     for card in cards:
+        if not isinstance(card, dict):
+            continue
         title = (card.get('title') or '').strip()
         try:
             score = int(card.get('score') or 0)
@@ -96,28 +100,77 @@ def parse_llm_cards(raw: str, min_score: int = 70) -> List[Dict]:
     return result
 
 
+def parse_llm_cards(raw: str, min_score: int = 70) -> List[Dict]:
+    """Parse LLM JSON output into a list of validated card dicts."""
+    data = json.loads(_extract_json_object(raw))
+    if not isinstance(data, dict):
+        raise ValueError('知识卡输出必须是 JSON 对象')
+    return _validate_llm_cards(data.get('cards', []), min_score)
+
+
+def _recover_complete_llm_cards(raw: str, min_score: int = 70) -> List[Dict]:
+    """Recover complete card objects before a malformed or truncated tail."""
+    text = ai_analyzer._preprocess_llm_json(raw)
+    match = re.search(r'"cards"\s*:\s*\[', text)
+    if not match:
+        return []
+
+    decoder = json.JSONDecoder()
+    index = match.end()
+    recovered = []
+    length = len(text)
+    while index < length:
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length or text[index] == ']':
+            break
+        if text[index] == ',':
+            index += 1
+            continue
+        try:
+            value, index = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            break
+        if isinstance(value, dict):
+            recovered.append(value)
+        else:
+            break
+    return _validate_llm_cards(recovered, min_score)
+
+
 def _parse_llm_cards_with_repair(raw: str, min_score: int, llm_call) -> List[Dict]:
-    """Parse knowledge cards, with one repair attempt for malformed JSON."""
+    """Parse cards with local salvage followed by bounded LLM repair."""
     try:
         return parse_llm_cards(raw, min_score=min_score)
     except (ValueError, json.JSONDecodeError) as first_error:
+        recovered = _recover_complete_llm_cards(raw, min_score=min_score)
+        if recovered:
+            return recovered
+
         system = """你是严格的 JSON 修复器。只输出修复后的合法 JSON 对象。
 不要输出思考、解释、Markdown、代码块或 <think> 标签。
 保持卡片字段和值不变，只修复 JSON 语法。输出必须以 { 开头、以 } 结尾。"""
-        user = (
-            f'下面内容应是知识卡 JSON，但解析失败：{first_error}\n'
-            '请只修复 JSON 语法，输出单个合法 JSON 对象。\n\n'
-            f'{ai_analyzer._preprocess_llm_json(raw)}'
-        )
-        repaired_raw = llm_call(system, user)
-        if ai_analyzer._is_reasoning_only_response(repaired_raw):
-            raise ValueError('LLM 修复响应仅包含推理文本，未返回 JSON')
-        try:
-            return parse_llm_cards(repaired_raw, min_score=min_score)
-        except (ValueError, json.JSONDecodeError) as repair_error:
-            raise ValueError(
-                f'知识卡 JSON 解析失败: {first_error}; 修复后仍失败: {repair_error}'
+        current = ai_analyzer._preprocess_llm_json(raw)
+        error = first_error
+        for attempt in range(2):
+            user = (
+                f'下面内容应是知识卡 JSON，但解析失败（第 {attempt + 1} 次修复）：{error}\n'
+                '请只修复 JSON 语法，输出单个合法 JSON 对象。\n\n'
+                f'{current}'
             )
+            repaired_raw = llm_call(system, user)
+            if ai_analyzer._is_reasoning_only_response(repaired_raw):
+                error = ValueError('LLM 修复响应仅包含推理文本，未返回 JSON')
+                continue
+            try:
+                return parse_llm_cards(repaired_raw, min_score=min_score)
+            except (ValueError, json.JSONDecodeError) as repair_error:
+                recovered = _recover_complete_llm_cards(repaired_raw, min_score=min_score)
+                if recovered:
+                    return recovered
+                current = ai_analyzer._preprocess_llm_json(repaired_raw)
+                error = repair_error
+        raise ValueError('知识卡输出无法解析') from error
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +537,7 @@ def extract_cards_from_messages(
     min_score: int = 70,
     domain: str = 'general',
     error_cb: Optional[Callable[[str], None]] = None,
+    _retry_depth: int = 0,
 ) -> List[Dict]:
     """Extract knowledge cards from messages using LLM.
 
@@ -506,9 +560,23 @@ def extract_cards_from_messages(
     raw = llm_call(system, user)
     try:
         parsed = _parse_llm_cards_with_repair(raw, min_score, llm_call)
-    except ValueError as e:
+    except ValueError:
+        can_split = (
+            _retry_depth < KNOWLEDGE_JSON_RETRY_MAX_DEPTH
+            and len(messages) >= KNOWLEDGE_JSON_RETRY_MIN_MESSAGES * 2
+        )
+        if can_split:
+            middle = len(messages) // 2
+            retry_cards = []
+            for sub_messages in (messages[:middle], messages[middle:]):
+                retry_cards.extend(extract_cards_from_messages(
+                    sub_messages, chat_name, date, llm_call,
+                    min_score=min_score, domain=domain, error_cb=error_cb,
+                    _retry_depth=_retry_depth + 1,
+                ))
+            return dedupe_knowledge_cards(retry_cards)
         if error_cb:
-            error_cb(str(e))
+            error_cb('部分消息因 AI 输出不完整未能提取')
         return []
 
     by_id = {}

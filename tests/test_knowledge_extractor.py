@@ -12,6 +12,7 @@ from engine.services.knowledge_extractor import (
     make_llm_call, readable_message_text, load_messages_for_scan,
     extract_cards_from_messages_chunked, dedupe_knowledge_cards,
     build_my_version_prompt, build_agent_rule_prompt, parse_agent_rule_draft,
+    _recover_complete_llm_cards,
 )
 
 
@@ -158,7 +159,48 @@ def test_extract_cards_repairs_malformed_json_once():
     assert len(calls) == 2
 
 
-def test_extract_cards_skips_reasoning_only_repair_and_reports_error():
+def test_recover_complete_cards_before_truncated_card():
+    first_card = {
+        'title': '完整卡片', 'type': 'sop', 'score': 90,
+        'summary': 's', 'why_valuable': 'w', 'content_md': 'c',
+        'tags': ['T'], 'source_msg_ids': [1],
+    }
+    raw = '{"cards": [' + json.dumps(first_card, ensure_ascii=False) + ', {' \
+        '"title": "被截断的卡片", "content_md": "未结束'
+
+    cards = _recover_complete_llm_cards(raw, min_score=70)
+
+    assert [card['title'] for card in cards] == ['完整卡片']
+    assert cards[0]['source_msg_ids'] == [1]
+
+
+def test_extract_cards_splits_messages_after_unrecoverable_json():
+    messages = [
+        {'id': i, 'create_time': i, 'sender_name': 'A', 'content': f'消息 {i}'}
+        for i in range(1, 5)
+    ]
+    calls = []
+
+    def fake_llm(system, user):
+        calls.append((system, user))
+        if 'JSON 修复器' in system or user.count('[msg_id=') == 4:
+            return '{"cards":['
+        first_id = int(user.split('[msg_id=')[1].split(']')[0])
+        return json.dumps({'cards': [{
+            'title': f'分段 {first_id}', 'type': 'note', 'score': 90,
+            'summary': 's', 'why_valuable': 'w', 'content_md': 'c',
+            'tags': [], 'source_msg_ids': [first_id],
+        }]})
+
+    cards = extract_cards_from_messages(
+        messages, '测试群', '2026-06-21', fake_llm, min_score=70,
+    )
+
+    assert [card['title'] for card in cards] == ['分段 1', '分段 3']
+    assert len(calls) >= 4
+
+
+def test_extract_cards_hides_parser_details_after_all_repairs_fail():
     messages = [{'id': 1, 'create_time': 100, 'sender_name': 'A', 'content': '可复用SOP'}]
     errors = []
     calls = []
@@ -171,9 +213,10 @@ def test_extract_cards_skips_reasoning_only_repair_and_reports_error():
         messages, '测试群', '2026-06-15', fake_llm, error_cb=errors.append
     )
     assert cards == []
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert len(errors) == 1
-    assert '仅包含推理文本' in errors[0]
+    assert errors == ['部分消息因 AI 输出不完整未能提取']
+    assert 'JSON' not in errors[0]
 
 
 def test_extract_cards_empty_messages():
@@ -316,7 +359,7 @@ def test_chunked_extraction_keeps_successful_chunks_when_one_chunk_has_bad_json(
         min_score=0, error_cb=errors.append,
     )
     assert [card['title'] for card in cards] == ['后续分块知识']
-    assert errors
+    assert errors == []
 
 
 # ---------------------------------------------------------------------------

@@ -155,7 +155,7 @@ def run_backup(
 
     # Stage 3: Migrate media
     try:
-        on_progress('migrate', 'Migrating media files...', 0.0)
+        on_progress('migrate', 'Migrating chat images...', 0.0)
         from .migrator import migrate_media
         media_stats = migrate_media(
             db_storage_path, output_dir,
@@ -165,9 +165,10 @@ def run_backup(
         )
         result['stats']['migrated'] = media_stats
         on_progress('migrate',
-            f"Media: {media_stats.get('hardlinked', 0)} hardlinked, "
+            f"Images: {media_stats.get('hardlinked', 0)} hardlinked, "
             f"{media_stats.get('link_reused', 0)} reused, "
-            f"{media_stats.get('copied', 0)} copied",
+            f"{media_stats.get('copied', 0)} copied; "
+            f"{media_stats.get('skipped_non_image', 0)} non-image items skipped",
             1.0)
     except Exception as e:
         result['errors'].append(f'Media migration failed: {e}')

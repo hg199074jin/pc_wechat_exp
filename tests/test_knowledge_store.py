@@ -288,16 +288,68 @@ def test_agent_rule_lifecycle_publish_archive(tmp_path):
     cid = save_card(db_path, {'title': 'T', 'score': 90})
     rid = create_agent_rule(db_path, cid, title='规则', category='engineering', content_md='正文')
     assert get_agent_rule(db_path, rid)['status'] == 'draft'
-    # Publish.
+    # Update bumps version (only allowed while still a draft).
+    assert update_agent_rule(db_path, rid, {'title': '规则2'})
+    assert get_agent_rule(db_path, rid)['version'] == 2
+    # Publish (becomes immutable).
     published = publish_agent_rule(db_path, rid)
     assert published['status'] == 'published'
     assert published['published_at'] is not None
-    # Update bumps version.
-    assert update_agent_rule(db_path, rid, {'title': '规则2'})
-    assert get_agent_rule(db_path, rid)['version'] == 2
     # Archive.
     assert archive_agent_rule(db_path, rid)
     assert get_agent_rule(db_path, rid)['status'] == 'archived'
+
+
+def test_resave_card_by_id_preserves_derivatives_and_rules(tmp_path):
+    """C1 regression: re-saving a card by id must NOT cascade-delete its
+    derivatives or crash on agent_rules. INSERT OR REPLACE used to DELETE+INSERT
+    under foreign_keys=ON, wiping derivatives (CASCADE) and tripping rules (RESTRICT)."""
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'id': 'c1', 'title': 'orig', 'score': 60,
+                              'lifecycle_stage': 'transformed'})
+    original = get_card(db_path, cid)
+    original_created_at = original['created_at']
+    assert original['lifecycle_stage'] == 'transformed'
+    did = create_derivative(db_path, cid, 'my_version', 'mv', 'content')
+    rid = create_agent_rule(db_path, cid, title='r', content_md='c')
+    # Re-save by id (simulates a re-scan or importer that reuses ids).
+    save_card(db_path, {'id': 'c1', 'title': 'RESCAN', 'score': 90})
+    # Derivative survived (no cascade), rule survived (no RESTRICT crash).
+    assert get_derivative(db_path, did) is not None
+    assert get_agent_rule(db_path, rid) is not None
+    # Card itself updated.
+    card = get_card(db_path, cid)
+    assert card['title'] == 'RESCAN'
+    assert card['score'] == 90
+    # created_at preserved (not reset to now).
+    assert card['created_at'] == original_created_at
+    # lifecycle_stage preserved (not reset to 'captured').
+    assert card['lifecycle_stage'] == 'transformed'
+
+
+def test_update_agent_rule_rejects_published(tmp_path):
+    """I1: published rules are immutable audit records."""
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid = save_card(db_path, {'title': 'T'})
+    rid = create_agent_rule(db_path, cid, title='t', content_md='c')
+    publish_agent_rule(db_path, rid)
+    import pytest
+    with pytest.raises(ValueError):
+        update_agent_rule(db_path, rid, {'title': 'changed'})
+
+
+def test_create_agent_rule_rejects_cross_card_derivative(tmp_path):
+    """I2: a rule's derivative must belong to its own source card."""
+    db_path = str(tmp_path / 'knowledge.db')
+    init_db(db_path)
+    cid_a = save_card(db_path, {'id': 'a', 'title': 'A'})
+    cid_b = save_card(db_path, {'id': 'b', 'title': 'B'})
+    did_b = create_derivative(db_path, cid_b, 'my_version', 'mv', 'content')
+    import pytest
+    with pytest.raises(ValueError):
+        create_agent_rule(db_path, cid_a, derivative_id=did_b, title='r', content_md='c')
 
 
 def test_publish_rejects_blank_rule(tmp_path):

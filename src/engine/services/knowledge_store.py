@@ -12,7 +12,7 @@ import uuid
 # is added. init_db only caches a db_path as initialised once its user_version
 # reaches CURRENT_SCHEMA_VERSION, so an old database is never skipped before its
 # migrations run.
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 # Cache of db paths already initialised in this process, so we don't re-run the
 # full CREATE TABLE/INDEX script on every save_card/list_cards call.
@@ -106,7 +106,7 @@ def init_db(db_path: str) -> None:
 
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    rows = conn.execute(f"PRAGMA table_info([{table}])").fetchall()
     return any(r[1] == column for r in rows)
 
 
@@ -114,8 +114,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """Apply idempotent migrations up to CURRENT_SCHEMA_VERSION."""
     version = conn.execute("PRAGMA user_version").fetchone()[0]
 
-    # v1 -> v2: lifecycle_stage + derivatives + agent_rules.
-    if version < 1:
+    # v0/v1 -> v2: lifecycle_stage + derivatives + agent_rules.
+    if version < CURRENT_SCHEMA_VERSION:
         # Add lifecycle_stage to existing knowledge_cards (default captured).
         if not _column_exists(conn, 'knowledge_cards', 'lifecycle_stage'):
             conn.execute(
@@ -157,7 +157,24 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_kd_card_id ON knowledge_derivatives(card_id);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ar_source_card_id ON agent_rules(source_card_id);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ar_status ON agent_rules(status);")
-        conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version = 2")
+
+    if version < 3:
+        if not _column_exists(conn, 'knowledge_cards', 'knowledge_space_id'):
+            conn.execute("ALTER TABLE knowledge_cards ADD COLUMN knowledge_space_id TEXT NOT NULL DEFAULT ''")
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS knowledge_spaces (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, vault_path TEXT NOT NULL,
+          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS knowledge_space_chats (
+          chat_id TEXT PRIMARY KEY, space_id TEXT NOT NULL, updated_at INTEGER NOT NULL,
+          FOREIGN KEY(space_id) REFERENCES knowledge_spaces(id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_kc_space ON knowledge_cards(knowledge_space_id);
+        CREATE INDEX IF NOT EXISTS idx_ksc_space ON knowledge_space_chats(space_id);
+        """)
+        conn.execute("PRAGMA user_version = 3")
 
 
 
@@ -178,6 +195,69 @@ DERIVATIVE_KINDS = {
 # Agent rule statuses and categories.
 RULE_STATUSES = {'draft', 'published', 'archived'}
 RULE_CATEGORIES = {'engineering', 'audit', 'workflow', 'writing', 'ai_usage', 'general'}
+
+
+def list_knowledge_spaces(db_path: str) -> list:
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        return [dict(row) for row in conn.execute("SELECT * FROM knowledge_spaces ORDER BY name COLLATE NOCASE, created_at")]
+    finally:
+        conn.close()
+
+
+def create_knowledge_space(db_path: str, name: str, vault_path: str) -> dict:
+    name, vault_path = (name or '').strip(), (vault_path or '').strip()
+    if not name or not vault_path:
+        raise ValueError('知识库名称和 Obsidian 路径不能为空')
+    init_db(db_path)
+    now = int(time.time())
+    space = {'id': str(uuid.uuid4()), 'name': name, 'vault_path': vault_path, 'created_at': now, 'updated_at': now}
+    conn = _connect(db_path)
+    try:
+        conn.execute("INSERT INTO knowledge_spaces (id, name, vault_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                     (space['id'], name, vault_path, now, now))
+        conn.commit()
+        return space
+    except sqlite3.IntegrityError as e:
+        raise ValueError('知识库名称不能重复') from e
+    finally:
+        conn.close()
+
+
+def assign_chats_to_knowledge_space(db_path: str, space_id: str, chat_ids: list) -> int:
+    ids = list(dict.fromkeys(cid for cid in (chat_ids or []) if cid))
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        if not conn.execute("SELECT 1 FROM knowledge_spaces WHERE id = ?", (space_id,)).fetchone():
+            raise ValueError('知识库空间不存在')
+        now = int(time.time())
+        conn.executemany("INSERT INTO knowledge_space_chats (chat_id, space_id, updated_at) VALUES (?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET space_id=excluded.space_id, updated_at=excluded.updated_at", [(cid, space_id, now) for cid in ids])
+        conn.commit()
+        return len(ids)
+    finally:
+        conn.close()
+
+
+def partition_chat_ids_by_knowledge_space(db_path: str, chat_ids: list) -> dict:
+    ids = list(dict.fromkeys(cid for cid in (chat_ids or []) if cid))
+    if not ids:
+        return {'buckets': [], 'unassigned': []}
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute("SELECT c.chat_id, s.id, s.name, s.vault_path, s.created_at, s.updated_at FROM knowledge_space_chats c JOIN knowledge_spaces s ON s.id=c.space_id WHERE c.chat_id IN (" + ','.join('?' for _ in ids) + ')', ids).fetchall()
+    finally:
+        conn.close()
+    by_chat, buckets, unassigned = {r['chat_id']: dict(r) for r in rows}, {}, []
+    for cid in ids:
+        space = by_chat.get(cid)
+        if not space:
+            unassigned.append(cid); continue
+        bucket = buckets.setdefault(space['id'], {'space': {k: space[k] for k in ('id','name','vault_path','created_at','updated_at')}, 'chat_ids': []})
+        bucket['chat_ids'].append(cid)
+    return {'buckets': list(buckets.values()), 'unassigned': unassigned}
 
 
 def _row_to_card(row: sqlite3.Row) -> dict:
@@ -219,10 +299,19 @@ def save_card(db_path: str, card: dict) -> str:
         else:
             lifecycle = card['lifecycle_stage'] if card['lifecycle_stage'] in LIFECYCLE_STAGES else 'captured'
         conn.execute("""
-          INSERT OR REPLACE INTO knowledge_cards
+          INSERT INTO knowledge_cards
           (id, title, type, status, score, summary, why_valuable, content_md,
-           tags_json, source_chat_ids_json, date, created_at, updated_at, lifecycle_stage)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           tags_json, source_chat_ids_json, date, created_at, updated_at, lifecycle_stage, knowledge_space_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            title=excluded.title, type=excluded.type, status=excluded.status,
+            score=excluded.score, summary=excluded.summary,
+            why_valuable=excluded.why_valuable, content_md=excluded.content_md,
+            tags_json=excluded.tags_json,
+            source_chat_ids_json=excluded.source_chat_ids_json,
+            date=excluded.date, created_at=excluded.created_at,
+            updated_at=excluded.updated_at, lifecycle_stage=excluded.lifecycle_stage,
+            knowledge_space_id=CASE WHEN knowledge_cards.knowledge_space_id = '' THEN excluded.knowledge_space_id ELSE knowledge_cards.knowledge_space_id END
         """, (
             card_id,
             (card.get('title') or '').strip(),
@@ -238,6 +327,7 @@ def save_card(db_path: str, card: dict) -> str:
             created_at,
             now,
             lifecycle,
+            (card.get('knowledge_space_id') or '').strip(),
         ))
         # Replace sources
         conn.execute("DELETE FROM knowledge_sources WHERE card_id = ?", (card_id,))
@@ -295,6 +385,7 @@ def list_cards(
     date_from: str = None,
     date_to: str = None,
     chat_id: str = None,
+    knowledge_space_id: str = None,
     limit: int = 100,
     offset: int = 0,
 ) -> dict:
@@ -323,6 +414,9 @@ def list_cards(
         if chat_id:
             where.append("source_chat_ids_json LIKE ? ESCAPE '\\'")
             params.append(f'%{_escape_like(chat_id)}%')
+        if knowledge_space_id:
+            where.append("knowledge_space_id = ?")
+            params.append(knowledge_space_id)
         if q:
             like = f'%{_escape_like(q)}%'
             where.append("(title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR content_md LIKE ? ESCAPE '\\' OR tags_json LIKE ? ESCAPE '\\')")
@@ -415,6 +509,12 @@ def bulk_update(db_path: str, card_ids: list, action: str, tags: list = None) ->
         count = 0
         for cid in card_ids:
             if action == 'delete':
+                # Check for dependent agent_rules (ON DELETE RESTRICT)
+                rule_count = conn.execute(
+                    "SELECT COUNT(*) FROM agent_rules WHERE source_card_id = ?", (cid,)
+                ).fetchone()[0]
+                if rule_count > 0:
+                    raise CardHasRulesError(cid, rule_count)
                 cur = conn.execute("DELETE FROM knowledge_cards WHERE id = ?", (cid,))
             elif action in ('inbox', 'saved', 'archived', 'rejected'):
                 cur = conn.execute(
@@ -612,6 +712,16 @@ def create_agent_rule(db_path: str, source_card_id: str, *,
     now = int(time.time())
     conn = _connect(db_path)
     try:
+        # If a derivative is referenced, it must belong to the same source card;
+        # otherwise the rule's traceability becomes incoherent (design 3.5).
+        if derivative_id:
+            d = conn.execute(
+                "SELECT card_id FROM knowledge_derivatives WHERE id = ?", (derivative_id,)
+            ).fetchone()
+            if not d:
+                raise ValueError(f'unknown derivative: {derivative_id}')
+            if d['card_id'] != source_card_id:
+                raise ValueError('derivative does not belong to this card')
         conn.execute("""
           INSERT INTO agent_rules
           (id, source_card_id, derivative_id, title, category, content_md, status,
@@ -666,6 +776,10 @@ def update_agent_rule(db_path: str, rule_id: str, updates: dict) -> bool:
         row = conn.execute("SELECT * FROM agent_rules WHERE id = ?", (rule_id,)).fetchone()
         if not row:
             return False
+        # Published rules are immutable audit records; archive first and create
+        # a new version if a change is needed (design principle 5: traceability).
+        if row['status'] == 'published':
+            raise ValueError('published rules are immutable; archive and create a new version')
         allowed = {'title', 'category', 'content_md', 'target_scope',
                    'target_project', 'target_path'}
         sets, params = [], []
@@ -697,6 +811,8 @@ def publish_agent_rule(db_path: str, rule_id: str) -> dict | None:
         row = conn.execute("SELECT * FROM agent_rules WHERE id = ?", (rule_id,)).fetchone()
         if not row:
             return None
+        if row['status'] == 'published':
+            return dict(row)
         if not (row['title'] or '').strip() or not (row['content_md'] or '').strip():
             raise ValueError('rule title and content_md must not be blank')
         now = int(time.time())
@@ -706,22 +822,28 @@ def publish_agent_rule(db_path: str, rule_id: str) -> dict | None:
             (now, now, rule_id),
         )
         conn.commit()
-        return get_agent_rule(db_path, rule_id)
+        updated = conn.execute("SELECT * FROM agent_rules WHERE id = ?", (rule_id,)).fetchone()
+        return dict(updated) if updated else None
     finally:
         conn.close()
 
 
 def archive_agent_rule(db_path: str, rule_id: str) -> bool:
-    """Archive a rule. Returns True if found."""
+    """Archive a rule. Returns True if found (already-archived rules are a no-op)."""
     init_db(db_path)
     conn = _connect(db_path)
     try:
-        cur = conn.execute(
+        row = conn.execute("SELECT status FROM agent_rules WHERE id = ?", (rule_id,)).fetchone()
+        if not row:
+            return False
+        if row['status'] == 'archived':
+            return True
+        conn.execute(
             "UPDATE agent_rules SET status = 'archived', updated_at = ? WHERE id = ?",
             (int(time.time()), rule_id),
         )
         conn.commit()
-        return cur.rowcount > 0
+        return True
     finally:
         conn.close()
 

@@ -112,6 +112,11 @@ _TYPE_CATEGORY = {
     47: 'images', 49: 'files',
 }
 
+# Only image data is useful to the local chat viewer.  File attachments,
+# videos and voice messages stay in the original WeChat storage instead of
+# being duplicated in each backup.
+_MIGRATED_MEDIA_TYPES = {3, 47}
+
 
 def _find_media_source(db_dir: str, media_ref: dict,
                        decrypted_dir: str = None) -> str:
@@ -240,7 +245,7 @@ def migrate_media(
     link_dest: Optional[str] = None,
     on_progress: Callable[[str, int, int], None] = None,
 ) -> dict:
-    """Migrate all media files using hardlinks, falling back to copy.
+    """Migrate chat images using hardlinks, falling back to copy.
 
     Args:
         db_dir: WeChat db_storage directory (for finding source files)
@@ -252,7 +257,8 @@ def migrate_media(
             first. If found, os.link() reuses the old copy instead of
             accessing the WeChat source — saving both time and disk space.
     Returns:
-        {total: N, hardlinked: N, copied: N, skipped: N, link_reused: N, errors: [str]}
+        {total: N, hardlinked: N, copied: N, skipped: N,
+         skipped_non_image: N, link_reused: N, errors: [str]}
     """
     start_ts = _date_str_to_ts(start_date) if start_date else None
     end_ts = _date_str_to_ts(end_date, end_of_day=True) if end_date else None
@@ -260,12 +266,9 @@ def migrate_media(
     msg_dir = os.path.join(output_dir, 'message')
     media_out = os.path.join(output_dir, 'media')
     os.makedirs(os.path.join(media_out, 'images'), exist_ok=True)
-    os.makedirs(os.path.join(media_out, 'videos'), exist_ok=True)
-    os.makedirs(os.path.join(media_out, 'files'), exist_ok=True)
-    os.makedirs(os.path.join(media_out, 'voice'), exist_ok=True)
 
     stats = {'total': 0, 'hardlinked': 0, 'copied': 0, 'skipped': 0,
-             'link_reused': 0, 'errors': []}
+             'skipped_non_image': 0, 'link_reused': 0, 'errors': []}
 
     if not os.path.isdir(msg_dir):
         return stats
@@ -290,12 +293,16 @@ def migrate_media(
 
     decrypted_data_dir = output_dir
     for i, ref in enumerate(all_refs):
+        mtype = ref.get('media_type', 0)
+        if mtype not in _MIGRATED_MEDIA_TYPES:
+            stats['skipped_non_image'] += 1
+            continue
+
         src = _find_media_source(db_dir, ref, decrypted_dir=decrypted_data_dir)
         if not src:
             stats['skipped'] += 1
             continue
 
-        mtype = ref.get('media_type', 0)
         subdir = _TYPE_CATEGORY.get(mtype, 'files')
         dst = os.path.join(media_out, subdir, os.path.basename(src))
 

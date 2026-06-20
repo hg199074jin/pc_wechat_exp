@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+
+logger = logging.getLogger(__name__)
 
 _scheduler: BackgroundScheduler | None = None
 _current_config_path: str = ''
@@ -54,15 +57,23 @@ def _load_schedules(config_path: str) -> list:
         with open(config_path, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
         return cfg.get('knowledge_schedules', [])
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to load knowledge schedules from %s: %s", config_path, e)
         return []
 
 
 def _register_job(sched: BackgroundScheduler, job: dict, config_path: str, decrypted_dir: str) -> None:
     time_str = job.get('time') or '08:00'
-    parts = time_str.split(':')
-    hour = int(parts[0]) if len(parts) >= 1 else 8
-    minute = int(parts[1]) if len(parts) >= 2 else 0
+    try:
+        parts = time_str.split(':')
+        hour = int(parts[0]) if len(parts) >= 1 else 8
+        minute = int(parts[1]) if len(parts) >= 2 else 0
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(f"Time out of range: {time_str}")
+    except (ValueError, IndexError) as e:
+        logger.warning("Invalid time '%s' for job '%s', using 08:00: %s",
+                       time_str, job.get('name', '?'), e)
+        hour, minute = 8, 0
 
     now = datetime.now()
     first_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -89,7 +100,7 @@ def _run_for_job(job: dict, config_path: str, decrypted_dir: str) -> None:
     try:
         llm_call = extractor.make_llm_call(config_path)
     except RuntimeError as e:
-        print(f"[知识雷达] LLM 配置错误: {e}")
+        logger.error("[知识雷达] LLM 配置错误: %s", e)
         return
 
     # Determine chat_ids
@@ -103,7 +114,7 @@ def _run_for_job(job: dict, config_path: str, decrypted_dir: str) -> None:
             pass
 
     if not chat_ids:
-        print("[知识雷达] 没有配置扫描群聊，跳过")
+        logger.warning("[知识雷达] 没有配置扫描群聊，跳过")
         return
 
     # Yesterday
@@ -117,40 +128,45 @@ def _run_for_job(job: dict, config_path: str, decrypted_dir: str) -> None:
 
     total_msgs = 0
     total_cards = 0
+    errors = []
 
-    try:
-        for cid in chat_ids:
-            try:
-                name = resolve_wxid(decrypted_dir, cid)
-                chat_name = name or cid
-            except Exception:
-                chat_name = cid
+    for cid in chat_ids:
+        try:
+            name = resolve_wxid(decrypted_dir, cid)
+            chat_name = name or cid
+        except Exception:
+            chat_name = cid
 
-            messages = extractor.load_messages_for_scan(decrypted_dir, cid, yesterday)
-            total_msgs += len(messages)
-            if not messages:
-                continue
+        messages = extractor.load_messages_for_scan(decrypted_dir, cid, yesterday)
+        total_msgs += len(messages)
+        if not messages:
+            continue
 
-            cards = extractor.extract_cards_from_messages(
-                messages, chat_name, yesterday, llm_call,
-                min_score=min_score, domain=domain,
-            )
-            for card in cards[:max_cards]:
-                for src in card.get('sources', []):
-                    src['chat_id'] = cid
-                card['source_chat_ids'] = [cid]
-                store.save_card(dbp, card)
-                total_cards += 1
+        def _error_cb(msg):
+            errors.append(f"[{chat_name}] {msg}")
+            logger.warning("Knowledge extraction error for %s: %s", chat_name, msg)
 
-        store.finish_run(dbp, run_id, status='done',
-                         total_messages=total_msgs, card_count=total_cards)
-        print(f"[知识雷达] 完成: {total_cards} 条知识卡片 (来自 {total_msgs} 条消息)")
+        cards = extractor.extract_cards_from_messages_chunked(
+            messages, chat_name, yesterday, llm_call,
+            min_score=min_score, domain=domain,
+            error_cb=_error_cb,
+        )
+        for card in cards[:max_cards]:
+            for src in card.get('sources', []):
+                src['chat_id'] = cid
+            card['source_chat_ids'] = [cid]
+            store.save_card(dbp, card)
+            total_cards += 1
 
-        # Best-effort Obsidian sync after a scan (new cards just landed).
-        _sync_obsidian_safely(decrypted_dir)
-    except Exception as e:
-        store.finish_run(dbp, run_id, status='error', error=str(e))
-        print(f"[知识雷达] 扫描失败: {e}")
+    status = 'done' if not errors else 'partial'
+    store.finish_run(dbp, run_id, status=status,
+                     total_messages=total_msgs, card_count=total_cards,
+                     error='; '.join(errors[-3:]) if errors else None)
+    logger.info("知识雷达完成: %d 条知识卡片 (来自 %d 条消息, %d 个错误)",
+                total_cards, total_msgs, len(errors))
+
+    # Best-effort Obsidian sync after a scan (new cards just landed).
+    _sync_obsidian_safely(decrypted_dir)
 
 
 def run_obsidian_sync(decrypted_dir: str) -> dict:
@@ -183,10 +199,10 @@ def _sync_obsidian_safely(decrypted_dir: str) -> None:
         result = run_obsidian_sync(decrypted_dir)
         if result.get('skipped_no_vault'):
             return
-        print(f"[知识雷达] Obsidian 同步: 写入 {result.get('written', 0)}，"
-              f"跳过 {result.get('skipped', 0)}")
+        logger.info("[知识雷达] Obsidian 同步: 写入 %d，跳过 %d",
+                    result.get('written', 0), result.get('skipped', 0))
     except Exception as e:
-        print(f"[知识雷达] Obsidian 同步失败: {e}")
+        logger.error("[知识雷达] Obsidian 同步失败: %s", e)
 
 
 def _resolve_tag_paths(tags: list, tag_paths: list, chat_ids: list) -> None:

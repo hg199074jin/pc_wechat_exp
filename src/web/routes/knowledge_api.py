@@ -93,6 +93,7 @@ def _list_cards_for_request(*, force_large: bool = False) -> dict:
         date_from=request.args.get('date_from'),
         date_to=request.args.get('date_to'),
         chat_id=request.args.get('chat_id'),
+        knowledge_space_id=request.args.get('knowledge_space_id'),
         limit=query_limit,
         offset=0 if tag_path else offset,
     )
@@ -109,6 +110,30 @@ def _list_cards_for_request(*, force_large: bool = False) -> dict:
 # ---------------------------------------------------------------------------
 # Card CRUD
 # ---------------------------------------------------------------------------
+
+@knowledge_bp.route('/spaces', methods=['GET', 'POST'])
+def knowledge_spaces_api():
+    if request.method == 'GET':
+        return jsonify({'spaces': store.list_knowledge_spaces(_db_path())})
+    data = request.get_json(silent=True) or {}
+    vault_path = str(data.get('vault_path') or '').strip()
+    if not vault_path or not os.path.isabs(vault_path):
+        return jsonify({'error': 'Obsidian 路径必须是本机绝对路径'}), 400
+    try:
+        space = store.create_knowledge_space(_db_path(), str(data.get('name') or ''), vault_path)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return jsonify({'space': space}), 201
+
+
+@knowledge_bp.route('/spaces/<space_id>/chats', methods=['PUT'])
+def assign_space_chats_api(space_id):
+    data = request.get_json(silent=True) or {}
+    try:
+        count = store.assign_chats_to_knowledge_space(_db_path(), space_id, data.get('chat_ids') or [])
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return jsonify({'ok': True, 'assigned': count})
 
 @knowledge_bp.route('/cards')
 def list_cards_api():
@@ -280,10 +305,13 @@ def draft_agent_rule_api(card_id):
         return jsonify({'error': f'草案解析失败: {e}'}), 500
     except Exception as e:
         return jsonify({'error': f'生成失败: {e}'}), 500
-    rule_id = store.create_agent_rule(
-        _db_path(), card_id, derivative_id=deriv_id,
-        title=draft['title'], category=draft['category'], content_md=draft['content_md'],
-    )
+    try:
+        rule_id = store.create_agent_rule(
+            _db_path(), card_id, derivative_id=deriv_id,
+            title=draft['title'], category=draft['category'], content_md=draft['content_md'],
+        )
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     return jsonify({'ok': True, 'rule': store.get_agent_rule(_db_path(), rule_id)})
 
 
@@ -299,8 +327,11 @@ def update_agent_rule_api(rule_id):
     allowed = {'title', 'category', 'content_md', 'target_scope',
                'target_project', 'target_path'}
     updates = {k: v for k, v in data.items() if k in allowed}
-    if not store.update_agent_rule(_db_path(), rule_id, updates):
-        return jsonify({'error': 'not found'}), 404
+    try:
+        if not store.update_agent_rule(_db_path(), rule_id, updates):
+            return jsonify({'error': 'not found'}), 404
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     return jsonify({'ok': True, 'rule': store.get_agent_rule(_db_path(), rule_id)})
 
 
@@ -385,13 +416,15 @@ def _cards_from_existing_artifact(decrypted_dir: str, chat_id: str,
     return extractor.cards_from_analysis_artifact(artifact, min_score=min_score)
 
 
-def _save_scan_cards(dbp: str, cards: list, chat_id: str, max_cards: int) -> int:
+def _save_scan_cards(dbp: str, cards: list, chat_id: str, max_cards: int,
+                     knowledge_space_id: str = '') -> int:
     """Persist scan cards and return the saved count."""
     saved = 0
     for card in cards[:max_cards]:
         for src in card.get('sources', []):
             src['chat_id'] = chat_id
         card['source_chat_ids'] = [chat_id]
+        card['knowledge_space_id'] = knowledge_space_id or ''
         store.save_card(dbp, card)
         saved += 1
     return saved
@@ -423,6 +456,11 @@ def run_knowledge_scan():
     wxid = current_app.config.get('WXID', '')
     dbp = store.knowledge_db_path(decrypted_dir)
     cfg_path = config_path_for(decrypted_dir)
+    partition = store.partition_chat_ids_by_knowledge_space(dbp, chat_ids)
+    space_by_chat = {cid: bucket['space']['id'] for bucket in partition['buckets'] for cid in bucket['chat_ids']}
+    chat_ids = [cid for cid in chat_ids if cid in space_by_chat]
+    if not chat_ids:
+        return jsonify({'error': '所选群聊尚未设置知识库归属，请先配置知识库空间'}), 400
 
     # Resolve chat names before entering thread
     chat_names = {}
@@ -445,7 +483,7 @@ def run_knowledge_scan():
         total_cards = 0
         reused_artifacts = 0
         llm_call = None
-        scan_warnings = []
+        scan_warnings = [f'未设置知识库归属，已跳过 {cid}' for cid in partition['unassigned']]
 
         def get_llm_call():
             nonlocal llm_call
@@ -483,7 +521,7 @@ def run_knowledge_scan():
                             if artifact_cards is not None:
                                 reused_artifacts += 1
                                 total_candidates += len(artifact_cards)
-                                total_cards += _save_scan_cards(dbp, artifact_cards, cid, max_cards)
+                                total_cards += _save_scan_cards(dbp, artifact_cards, cid, max_cards, space_by_chat[cid])
                                 push('progress', f'复用 AI 分析结果 {cname} ({date}): {len(artifact_cards)} 条知识',
                                      step / max(total_steps, 1))
                                 continue
@@ -503,7 +541,7 @@ def run_knowledge_scan():
                                 scan_warnings.append(f'跳过 {cname} ({date}): {reason}'),
                         )
                         total_candidates += len(cards)
-                        total_cards += _save_scan_cards(dbp, cards, cid, max_cards)
+                        total_cards += _save_scan_cards(dbp, cards, cid, max_cards, space_by_chat[cid])
 
                         push('progress', f'完成 {cname} ({date}): {len(cards)} 条知识',
                              step / max(total_steps, 1))
@@ -525,7 +563,7 @@ def run_knowledge_scan():
                         if artifact_cards is not None:
                             reused_artifacts += 1
                             total_candidates += len(artifact_cards)
-                            total_cards += _save_scan_cards(dbp, artifact_cards, cid, max_cards)
+                            total_cards += _save_scan_cards(dbp, artifact_cards, cid, max_cards, space_by_chat[cid])
                             push('progress', f'复用 AI 分析结果 {cname} ({start_str} ~ {end_str}): {len(artifact_cards)} 条知识',
                                  step / max(total_steps, 1))
                             continue
@@ -547,7 +585,7 @@ def run_knowledge_scan():
                             scan_warnings.append(f'跳过 {cname} ({label}): {reason}'),
                     )
                     total_candidates += len(cards)
-                    total_cards += _save_scan_cards(dbp, cards, cid, max_cards)
+                    total_cards += _save_scan_cards(dbp, cards, cid, max_cards, space_by_chat[cid])
 
                     push('progress', f'完成 {cname} ({start_str} ~ {end_str}): {len(cards)} 条知识',
                          step / max(total_steps, 1))
@@ -570,7 +608,11 @@ def run_knowledge_scan():
         finally:
             _run_lock.release()
 
-    threading.Thread(target=_run, daemon=True).start()
+    try:
+        threading.Thread(target=_run, daemon=True).start()
+    except Exception:
+        _run_lock.release()
+        raise
     return sse_response(gen)
 
 
@@ -688,22 +730,21 @@ def _collect_cards_for_obsidian_sync() -> list:
 
 @knowledge_bp.route('/sync-obsidian', methods=['POST'])
 def sync_obsidian_api():
-    """Sync knowledge cards into the configured Obsidian vault (incremental)."""
-    from engine.config_file import get_obsidian_vault_path
-    from engine.services.obsidian_export import sync_cards_to_vault
-
-    vault_path = get_obsidian_vault_path()
-    if not vault_path:
-        return jsonify({'error': '请先配置 Obsidian vault 路径'}), 400
+    """Sync cards to their configured knowledge-space vaults (incremental)."""
+    from engine.services.obsidian_export import sync_cards_to_spaces
 
     cards = _collect_cards_for_obsidian_sync()
     decrypted_dir = current_app.config.get('DECRYPTED_DIR', '')
-    result = sync_cards_to_vault(cards, vault_path, decrypted_dir=decrypted_dir)
+    spaces = store.list_knowledge_spaces(_db_path())
+    if not spaces:
+        return jsonify({'error': '请先配置至少一个知识库空间'}), 400
+    result = sync_cards_to_spaces(cards, spaces, decrypted_dir=decrypted_dir)
     return jsonify({
-        'vault_path': vault_path,
         'card_count': len(cards),
         'written': result.get('written', 0),
         'skipped': result.get('skipped', 0),
+        'unassigned': result.get('unassigned', 0),
+        'spaces': result.get('spaces', []),
         'errors': result.get('errors') or [],
     })
 
@@ -722,11 +763,22 @@ def _load_knowledge_schedules(config_path: str) -> list:
 
 
 def _save_knowledge_schedules(schedules: list, config_path: str) -> None:
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            cfg = json.load(f)
-    except Exception:
-        cfg = {}
+    import logging
+    logger = logging.getLogger(__name__)
+    cfg = {}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+        except Exception as e:
+            # Back up corrupted file before overwriting
+            backup = config_path + '.bak'
+            try:
+                import shutil
+                shutil.copy2(config_path, backup)
+                logger.warning("Config file corrupted, backed up to %s: %s", backup, e)
+            except OSError:
+                logger.warning("Config file corrupted and backup failed: %s", e)
     cfg['knowledge_schedules'] = schedules
     os.makedirs(os.path.dirname(config_path) or '.', exist_ok=True)
     with open(config_path, 'w', encoding='utf-8') as f:
@@ -738,14 +790,21 @@ def list_schedules_api():
     return jsonify({'schedules': _load_knowledge_schedules(_config_path())})
 
 
+_SCHEDULE_ALLOWED_FIELDS = {
+    'name', 'chat_ids', 'tag_paths', 'date_range', 'frequency',
+    'time', 'min_score', 'domain', 'max_cards', 'enabled',
+}
+
+
 @knowledge_bp.route('/schedules', methods=['POST'])
 def add_schedule_api():
     data = request.get_json(silent=True) or {}
-    data.setdefault('id', str(uuid.uuid4()))
-    data.setdefault('enabled', True)
+    safe = {k: v for k, v in data.items() if k in _SCHEDULE_ALLOWED_FIELDS}
+    safe.setdefault('id', str(uuid.uuid4()))
+    safe.setdefault('enabled', True)
     cfg_path = _config_path()
     schedules = _load_knowledge_schedules(cfg_path)
-    schedules.append(data)
+    schedules.append(safe)
     _save_knowledge_schedules(schedules, cfg_path)
     # Reload scheduler
     try:
@@ -759,11 +818,12 @@ def add_schedule_api():
 @knowledge_bp.route('/schedules/<sched_id>', methods=['PUT'])
 def update_schedule_api(sched_id):
     data = request.get_json(silent=True) or {}
+    safe = {k: v for k, v in data.items() if k in _SCHEDULE_ALLOWED_FIELDS}
     cfg_path = _config_path()
     schedules = _load_knowledge_schedules(cfg_path)
     for s in schedules:
         if s.get('id') == sched_id:
-            s.update(data)
+            s.update(safe)
             _save_knowledge_schedules(schedules, cfg_path)
             try:
                 from engine.services import knowledge_scheduler

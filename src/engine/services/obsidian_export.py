@@ -12,6 +12,8 @@ import os
 import re
 from typing import Dict, List, Optional
 
+from engine.utils import safe_id as _safe_id
+
 
 # Card type -> Chinese subdirectory name (aligned with the front-end labels).
 TYPE_DIR_MAP: Dict[str, str] = {
@@ -33,15 +35,6 @@ EXPORT_MARKER = 'obsidian-export'
 # Maximum length of the title-derived filename stem, to avoid OS path limits
 # once the id suffix and extension are appended.
 _MAX_TITLE_STEM = 60
-
-
-def _safe_id(value: str) -> str:
-    """Filesystem-safe id, mirroring analysis_artifact._safe_id.
-
-    Alphanumerics and ``_@`` are preserved (Chinese chars are alphanumeric in
-    Python, so they survive). Everything else becomes ``_``.
-    """
-    return ''.join(c if c.isalnum() or c in '_@' else '_' for c in (value or ''))
 
 
 def _safe_filename(title: str, card_id: str) -> str:
@@ -123,6 +116,7 @@ def _render_frontmatter(card: dict, group_names: List[str]) -> str:
         f'date: {_yaml_escape(card.get("date") or "")}',
         f'tags: {tags_yaml}',
         f'source_chats: {source_chats}',
+        f'knowledge_space: {_yaml_escape(card.get("knowledge_space_name") or "")}',
         f'updated_at: {int(card.get("updated_at") or 0)}',
         f'wechat_exp: "{EXPORT_MARKER}"',
         '---',
@@ -282,6 +276,29 @@ def sync_cards_to_vault(
             errors.append(f'{card.get("id") or "?"}: {e}')
 
     return {'written': written, 'skipped': skipped, 'errors': errors}
+
+
+def sync_cards_to_spaces(cards: List[dict], spaces: List[dict], decrypted_dir: Optional[str] = None) -> dict:
+    """Sync every card only to its assigned knowledge-space vault."""
+    space_map = {s.get('id'): s for s in (spaces or []) if s.get('id') and s.get('vault_path')}
+    grouped, unassigned = {}, 0
+    for card in cards or []:
+        space = space_map.get(card.get('knowledge_space_id') or '')
+        if not space:
+            unassigned += 1
+            continue
+        item = dict(card)
+        item['knowledge_space_name'] = space.get('name') or ''
+        grouped.setdefault(space['id'], []).append(item)
+    written = skipped = 0
+    errors, results = [], []
+    for sid, group in grouped.items():
+        space = space_map[sid]
+        result = sync_cards_to_vault(group, space['vault_path'], decrypted_dir=decrypted_dir)
+        written += result.get('written', 0); skipped += result.get('skipped', 0)
+        errors.extend(result.get('errors') or [])
+        results.append({'space_id': sid, 'space_name': space.get('name') or '', 'vault_path': space['vault_path'], 'written': result.get('written', 0), 'skipped': result.get('skipped', 0), 'errors': result.get('errors') or []})
+    return {'written': written, 'skipped': skipped, 'unassigned': unassigned, 'spaces': results, 'errors': errors}
 
 
 def find_vault_files(vault_path: str) -> List[dict]:

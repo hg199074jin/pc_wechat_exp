@@ -102,6 +102,7 @@ def decrypt_database(db_path, out_path, enc_key, print_fn=None, progress_fn=None
                         last_progress = cur
 
         # Verify: at minimum, sqlite_master must be readable
+        conn = None
         try:
             conn = sqlite3.connect(out_path)
             tables = conn.execute(
@@ -120,7 +121,6 @@ def decrypt_database(db_path, out_path, enc_key, print_fn=None, progress_fn=None
             except sqlite3.Error as integ_err:
                 print_fn(f"  [WARN] 完整性检查跳过 (FTS/辅助数据库): {integ_err}")
 
-            conn.close()
             for suffix in ("-shm", "-wal"):
                 residual = out_path + suffix
                 if os.path.exists(residual):
@@ -132,6 +132,9 @@ def decrypt_database(db_path, out_path, enc_key, print_fn=None, progress_fn=None
         except (sqlite3.Error, OSError) as e:
             print_fn(f"  [WARN] SQLite验证失败: {e}")
             return False
+        finally:
+            if conn:
+                conn.close()
     except OSError as e:
         print_fn(f"  [ERROR] 写入解密输出失败: {e}")
         try:
@@ -192,11 +195,11 @@ def run_decrypt(keys_file=None, db_dir=None, out_dir=None, print_fn=None, progre
 
     # Collect all DB files
     db_files = []
-    for root, dirs, files in os.walk(db_dir):
+    for root, dirs, files in os.walk(db_dir_val):
         for f in files:
             if f.endswith('.db') and not f.endswith('-wal') and not f.endswith('-shm'):
                 path = os.path.join(root, f)
-                rel = os.path.relpath(path, db_dir)
+                rel = os.path.relpath(path, db_dir_val)
                 sz = os.path.getsize(path)
                 db_files.append((rel, path, sz))
 
