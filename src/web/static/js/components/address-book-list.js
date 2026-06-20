@@ -2,7 +2,7 @@
 class AddressBookList extends Component {
   template(data) {
     if (data.loading) {
-      return '<div class="loading"><div class="loading-icon">&#x23f3;</div>加载通讯录...</div>';
+      showSkeleton(this.el, 10); return '';
     }
     if (data.error) {
       return '<div class="error-msg">&#x26a0; ' + escapeHtml(data.error) +

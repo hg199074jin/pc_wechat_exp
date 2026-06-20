@@ -8,17 +8,205 @@
 {% block head %}{% endblock %}
 </head>
 <body>
-<nav id="top-nav">
+<a href="#main-content" class="skip-link" style="position:absolute;top:-40px;left:0;background:#58a6ff;color:#000;padding:8px;z-index:10001;transition:top 0.3s;" onfocus="this.style.top='0'" onblur="this.style.top='-40px'">跳转到主要内容</a>
+<nav id="top-nav" role="navigation" aria-label="主导航">
+  <button class="hamburger-btn" id="hamburger-btn" aria-label="切换侧边栏" title="切换侧边栏">&#9776;</button>
   <a href="/" class="nav-brand">WeChat EXP</a>
   <span class="nav-version" title="版本号">v{{ app_version }}</span>
+  <div class="nav-search" style="flex:1;max-width:400px;margin:0 16px;">
+    <input id="global-search" type="search" placeholder="🔍 搜索联系人、消息、知识卡片... (Ctrl+K)" aria-label="全局搜索" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:6px 12px;color:#c9d1d9;font-size:13px;" autocomplete="off">
+    <div id="global-search-results" style="display:none;position:absolute;top:100%;left:0;right:0;background:#161b22;border:1px solid #30363d;border-radius:0 0 6px 6px;max-height:400px;overflow-y:auto;z-index:1000;box-shadow:0 8px 24px rgba(0,0,0,0.4);"></div>
+  </div>
   <div class="nav-right">
+    <div class="a11y-controls" role="group" aria-label="辅助功能">
+      <button class="nav-btn" id="font-decrease" title="减小字号" aria-label="减小字号">A-</button>
+      <button class="nav-btn" id="font-increase" title="增大字号" aria-label="增大字号">A+</button>
+      <button class="nav-btn" id="contrast-toggle" title="切换高对比度模式" aria-label="切换高对比度模式">◐</button>
+    </div>
     <a href="/manual" class="nav-manual" title="使用手册">📖 使用手册</a>
     {% block nav_right %}{% endblock %}
   </div>
 </nav>
-<main id="content">
+<div class="sidebar-overlay" id="sidebar-overlay"></div>
+<main id="main-content">
 {% block content %}{% endblock %}
 </main>
 {% block scripts %}{% endblock %}
+<script>
+// Sidebar toggle for responsive layout
+(function() {
+  var btn = document.getElementById('hamburger-btn');
+  var overlay = document.getElementById('sidebar-overlay');
+  if (!btn || !overlay) return;
+
+  // Find the sidebar element on the current page
+  function findSidebar() {
+    return document.getElementById('sidebar')
+      || document.getElementById('contacts-sidebar')
+      || document.getElementById('cleanup-sidebar')
+      || document.querySelector('.page-layout aside.sidebar')
+      || document.querySelector('.knowledge-sidebar');
+  }
+
+  function openSidebar() {
+    var sb = findSidebar();
+    if (sb) {
+      sb.classList.add('sidebar-open');
+      overlay.classList.add('visible');
+    }
+  }
+
+  function closeSidebar() {
+    var sb = findSidebar();
+    if (sb) {
+      sb.classList.remove('sidebar-open');
+      overlay.classList.remove('visible');
+    }
+  }
+
+  btn.addEventListener('click', function() {
+    var sb = findSidebar();
+    if (!sb) return;
+    if (sb.classList.contains('sidebar-open')) {
+      closeSidebar();
+    } else {
+      openSidebar();
+    }
+  });
+
+  overlay.addEventListener('click', closeSidebar);
+
+  // Close sidebar on Escape key
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeSidebar();
+  });
+
+  // Close sidebar when window is resized above breakpoint
+  window.addEventListener('resize', function() {
+    if (window.innerWidth > 768) closeSidebar();
+  });
+})();
+</script>
+<script>
+// Global search
+(function() {
+  var input = document.getElementById('global-search');
+  var results = document.getElementById('global-search-results');
+  if (!input || !results) return;
+  var timer = null;
+
+  input.addEventListener('input', function() {
+    clearTimeout(timer);
+    var q = input.value.trim();
+    if (q.length < 2) { results.style.display = 'none'; return; }
+    timer = setTimeout(function() { doSearch(q); }, 300);
+  });
+
+  input.addEventListener('focus', function() {
+    if (results.children.length > 0) results.style.display = 'block';
+  });
+
+  document.addEventListener('click', function(e) {
+    if (!e.target.closest('.nav-search')) results.style.display = 'none';
+  });
+
+  // Ctrl+K to focus search (skip if user is already in an input)
+  document.addEventListener('keydown', function(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'k' && !['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)) {
+      e.preventDefault();
+      input.focus();
+      input.select();
+    }
+  });
+
+  async function doSearch(q) {
+    results.innerHTML = '<div style="padding:12px;color:#8b949e;font-size:13px;">搜索中...</div>';
+    results.style.display = 'block';
+    try {
+      var r = await fetch('/api/search?q=' + encodeURIComponent(q));
+      var d = await r.json();
+      renderResults(d, q);
+    } catch(e) {
+      results.innerHTML = '<div style="padding:12px;color:#f85149;font-size:13px;">搜索失败</div>';
+    }
+  }
+
+  function renderResults(data, q) {
+    var html = '';
+    if (data.contacts && data.contacts.length) {
+      html += '<div style="padding:8px 12px;font-size:11px;color:#8b949e;border-bottom:1px solid #21262d;">联系人</div>';
+      data.contacts.forEach(function(c) {
+        html += '<a href="/chat?contact=' + encodeURIComponent(c.name) + '" style="display:block;padding:8px 12px;color:#c9d1d9;text-decoration:none;font-size:13px;border-bottom:1px solid #21262d;">' + escapeHtml(c.name) + '</a>';
+      });
+    }
+    if (data.messages && data.messages.length) {
+      html += '<div style="padding:8px 12px;font-size:11px;color:#8b949e;border-bottom:1px solid #21262d;">消息</div>';
+      data.messages.forEach(function(m) {
+        html += '<a href="/chat?contact=' + encodeURIComponent(m.chat_id) + '" style="display:block;padding:8px 12px;color:#c9d1d9;text-decoration:none;font-size:13px;border-bottom:1px solid #21262d;"><span style="color:#8b949e;font-size:11px;">' + escapeHtml(m.sender) + '</span> ' + escapeHtml(m.preview) + '</a>';
+      });
+    }
+    if (data.knowledge && data.knowledge.length) {
+      html += '<div style="padding:8px 12px;font-size:11px;color:#8b949e;border-bottom:1px solid #21262d;">知识卡片</div>';
+      data.knowledge.forEach(function(k) {
+        html += '<a href="/knowledge" style="display:block;padding:8px 12px;color:#c9d1d9;text-decoration:none;font-size:13px;border-bottom:1px solid #21262d;">' + escapeHtml(k.title) + ' <span style="color:#8b949e;font-size:11px;">(' + k.score + '分)</span></a>';
+      });
+    }
+    if (!html) html = '<div style="padding:12px;color:#8b949e;font-size:13px;">未找到匹配结果</div>';
+    results.innerHTML = html;
+  }
+})();
+</script>
+<script>
+// Accessibility: font size control and high contrast toggle
+(function() {
+  var BASE_FONT_SIZE = 14;
+  var STORAGE_KEY_FONT = 'wechat_exp_font_size';
+  var STORAGE_KEY_CONTRAST = 'wechat_exp_high_contrast';
+
+  // Restore saved font size
+  var savedSize = localStorage.getItem(STORAGE_KEY_FONT);
+  if (savedSize) {
+    document.documentElement.style.fontSize = savedSize + 'px';
+  }
+
+  // Restore high contrast
+  if (localStorage.getItem(STORAGE_KEY_CONTRAST) === '1') {
+    document.body.classList.add('high-contrast');
+  }
+
+  var btnDec = document.getElementById('font-decrease');
+  var btnInc = document.getElementById('font-increase');
+  var btnContrast = document.getElementById('contrast-toggle');
+
+  function getCurrentSize() {
+    var s = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    return isNaN(s) ? BASE_FONT_SIZE : s;
+  }
+
+  function setSize(size) {
+    size = Math.max(10, Math.min(24, size));
+    document.documentElement.style.fontSize = size + 'px';
+    localStorage.setItem(STORAGE_KEY_FONT, size);
+  }
+
+  if (btnDec) {
+    btnDec.addEventListener('click', function() {
+      setSize(getCurrentSize() - 1);
+    });
+  }
+  if (btnInc) {
+    btnInc.addEventListener('click', function() {
+      setSize(getCurrentSize() + 1);
+    });
+  }
+  if (btnContrast) {
+    btnContrast.addEventListener('click', function() {
+      document.body.classList.toggle('high-contrast');
+      var isOn = document.body.classList.contains('high-contrast');
+      localStorage.setItem(STORAGE_KEY_CONTRAST, isOn ? '1' : '0');
+    });
+  }
+})();
+</script>
 </body>
 </html>

@@ -2,6 +2,11 @@
  * AI 群聊分析页面逻辑.
  * 依赖: marked.js (CDN), 原生 fetch API.
  */
+function _af(url, opts = {}) {
+  opts.headers = Object.assign({ 'X-Requested-With': 'XMLHttpRequest' }, opts.headers || {});
+  return fetch(url, opts);
+}
+
 const AnalysisApp = {
   schedules: [],
   results: [],
@@ -165,7 +170,7 @@ const AnalysisApp = {
   // -------------------------------------------------------------------
   async loadConfig() {
     try {
-      const r = await fetch('/api/analysis/config');
+      const r = await _af('/api/analysis/config');
       const data = await r.json();
       const cfg = data.llm || {};
       document.getElementById('cfg-base-url').value = cfg.base_url || '';
@@ -198,23 +203,23 @@ const AnalysisApp = {
       proxy: this._collectProxyFromUi(),
     };
     if (!llm.base_url || !llm.api_key || !llm.model) {
-      alert('请填写完整 LLM 配置'); return;
+      showToast('请填写完整 LLM 配置', 'warning'); return;
     }
-    const r = await fetch('/api/analysis/config', {
+    const r = await _af('/api/analysis/config', {
       method: 'PUT', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({llm}),
     });
     if (r.ok) {
       document.getElementById('settings-modal').hidden = true;
       this.loadConfig();
-    } else { alert('保存失败'); }
+    } else { showToast('保存失败', 'error'); }
   },
 
   async testConnection() {
     const out = document.getElementById('test-result');
     out.textContent = '测试中...';
     try {
-      const r = await fetch('/api/analysis/test', {method: 'POST'});
+      const r = await _af('/api/analysis/test', {method: 'POST'});
       const data = await r.json();
       out.textContent = data.ok ? `✅ 成功: ${data.reply || ''}` : `❌ 失败: ${data.error}`;
     } catch (e) { out.textContent = `❌ 请求失败: ${e.message}`; }
@@ -259,7 +264,7 @@ const AnalysisApp = {
   // -------------------------------------------------------------------
   async loadTagTree() {
     try {
-      const r = await fetch('/api/analysis/tags');
+      const r = await _af('/api/analysis/tags');
       const data = await r.json();
       this.tags = data.tags || [];
       this.untagged = data.untagged || [];
@@ -285,7 +290,7 @@ const AnalysisApp = {
 
   async loadGroupNames() {
     try {
-      const r = await fetch('/api/address-book/groups');
+      const r = await _af('/api/address-book/groups');
       if (!r.ok) return;
       const data = await r.json();
       (data.groups || []).forEach(g => {
@@ -539,7 +544,7 @@ const AnalysisApp = {
   async loadResults(options = {}) {
     try {
       const url = options.cacheBust ? `/api/analysis/results?t=${Date.now()}` : '/api/analysis/results';
-      const r = await fetch(url, {cache: 'no-store'});
+      const r = await _af(url, {cache: 'no-store'});
       const data = await r.json();
       this.results = data.results || [];
       this.renderResults();
@@ -588,7 +593,7 @@ const AnalysisApp = {
       const btn = e.target.closest('button[data-del-chat]');
       if (btn) {
         if (!confirm(`删除 ${btn.dataset.delDate} 的分析结果？`)) return;
-        fetch(`/api/analysis/result/${encodeURIComponent(btn.dataset.delChat)}/${btn.dataset.delDate}`, {method: 'DELETE'})
+        _af(`/api/analysis/result/${encodeURIComponent(btn.dataset.delChat)}/${btn.dataset.delDate}`, {method: 'DELETE'})
           .then(() => this.loadResults());
         return;
       }
@@ -620,7 +625,7 @@ const AnalysisApp = {
 
   async _loadMd(chatId, date, target) {
     try {
-      const r = await fetch(`/api/analysis/result/${encodeURIComponent(chatId)}/${date}`);
+      const r = await _af(`/api/analysis/result/${encodeURIComponent(chatId)}/${date}`);
       if (!r.ok) { target.textContent = '加载失败'; return; }
       const data = await r.json();
       target.innerHTML = this._sanitizeHtml(marked.parse(this.sanitizeMarkdown(data.content || '', this._groupName(chatId))));
@@ -631,7 +636,7 @@ const AnalysisApp = {
     const panel = card.querySelector(`.result-panel[data-panel="${panelName}"]`);
     if (!panel) return;
     try {
-      const r = await fetch(`/api/analysis/result/${encodeURIComponent(chatId)}/${date}/artifact`);
+      const r = await _af(`/api/analysis/result/${encodeURIComponent(chatId)}/${date}/artifact`);
       if (!r.ok) {
         panel.innerHTML = '<div class="empty-state">这个结果没有结构化 artifact，重新分析后可查看。</div>';
         panel.dataset.loaded = '1';
@@ -694,16 +699,16 @@ const AnalysisApp = {
 
   async importKnowledgeCandidates(chatId, date) {
     try {
-      const r = await fetch(`/api/analysis/result/${encodeURIComponent(chatId)}/${date}/knowledge-candidates/import`, {
+      const r = await _af(`/api/analysis/result/${encodeURIComponent(chatId)}/${date}/knowledge-candidates/import`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({min_score: 80}),
       });
       const data = await r.json();
       if (!r.ok || !data.ok) throw new Error(data.error || '导入失败');
-      alert(`已沉淀 ${data.created || 0} 条知识卡片，可在知识雷达查看。`);
+      showToast(`已沉淀 ${data.created || 0} 条知识卡片，可在知识雷达查看。`, 'success');
     } catch (e) {
-      alert(`沉淀失败：${e.message}`);
+      showToast(`沉淀失败：${e.message}`, 'error');
     }
   },
 
@@ -748,7 +753,7 @@ const AnalysisApp = {
   // -------------------------------------------------------------------
   async loadSchedules() {
     try {
-      const r = await fetch('/api/analysis/schedules');
+      const r = await _af('/api/analysis/schedules');
       const data = await r.json();
       this.schedules = data.schedules || [];
       this.renderSchedules();
@@ -776,7 +781,7 @@ const AnalysisApp = {
       if (editBtn) this.openScheduleModal(editBtn.dataset.editSched);
       if (delBtn) {
         if (confirm('删除该定时任务？'))
-          fetch(`/api/analysis/schedules/${delBtn.dataset.delSched}`, {method: 'DELETE'}).then(() => this.loadSchedules());
+          _af(`/api/analysis/schedules/${delBtn.dataset.delSched}`, {method: 'DELETE'}).then(() => this.loadSchedules());
       }
     };
   },
@@ -811,7 +816,7 @@ const AnalysisApp = {
 
   async saveSchedule() {
     const chatIds = [...document.querySelectorAll('#sched-group-list input:checked')].map(cb => cb.value);
-    if (chatIds.length === 0) { alert('请至少选择一个群'); return; }
+    if (chatIds.length === 0) { showToast('请至少选择一个群', 'warning'); return; }
     const data = {
       name: document.getElementById('sched-name').value.trim() || '未命名任务',
       time: document.getElementById('sched-time').value.trim() || '08:00',
@@ -820,7 +825,7 @@ const AnalysisApp = {
     };
     const url = this.currentScheduleId ? `/api/analysis/schedules/${this.currentScheduleId}` : '/api/analysis/schedules';
     const method = this.currentScheduleId ? 'PUT' : 'POST';
-    await fetch(url, {method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)});
+    await _af(url, {method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)});
     document.getElementById('schedule-modal').hidden = true;
     this.loadSchedules();
   },
@@ -830,12 +835,12 @@ const AnalysisApp = {
   // -------------------------------------------------------------------
   async runAnalysis() {
     const chatIds = this.collectSelectedChatIds();
-    if (chatIds.length === 0) { alert('请至少选择一个群'); return; }
+    if (chatIds.length === 0) { showToast('请至少选择一个群', 'warning'); return; }
     const dateFrom = document.getElementById('date-from').value;
     const dateTo = document.getElementById('date-to').value;
     const modeEl = document.querySelector('input[name="analysis-mode"]:checked');
     const analysisMode = modeEl ? modeEl.value : 'range';
-    if (!dateFrom || !dateTo) { alert('请选择日期范围'); return; }
+    if (!dateFrom || !dateTo) { showToast('请选择日期范围', 'warning'); return; }
 
     document.getElementById('run-progress').hidden = false;
     document.getElementById('run-btn').disabled = true;
@@ -843,7 +848,7 @@ const AnalysisApp = {
     const text = document.getElementById('progress-text');
 
     try {
-      const r = await fetch('/api/analysis/run', {
+      const r = await _af('/api/analysis/run', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
           chat_ids: chatIds,

@@ -77,7 +77,7 @@
         CleanupStore.emit('modal-stage-changed', 'preview');
       }).catch(function(e) {
         if (e.name === 'AbortError') return; // cancelled by another request, ignore
-        alert('预览失败: ' + (e.message || '未知错误'));
+        showToast('预览失败: ' + (e.message || '未知错误'), 'error');
       }).finally(function() {
         previewBtn.disabled = false;
         previewBtn.textContent = '预览删除';

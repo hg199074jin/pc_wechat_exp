@@ -78,9 +78,9 @@ window.WhisperTranscriber = {
 <div id="app">
   <aside id="sidebar">
     <div class="sidebar-header">
-      <input type="text" id="contact-search" placeholder="搜索联系人/群聊..." autocomplete="off">
+      <input type="text" id="contact-search" placeholder="搜索联系人/群聊..." autocomplete="off" aria-label="搜索联系人或群聊">
     </div>
-    <div id="contact-list" class="contact-list"></div>
+    <div id="contact-list" class="contact-list" aria-live="polite" aria-label="联系人列表"></div>
   </aside>
 
   <main id="main">
@@ -97,15 +97,15 @@ window.WhisperTranscriber = {
         <span id="chat-name" class="chat-name"></span>
         <span id="chat-stats" class="chat-stats"></span>
       </div>
-      <button id="btn-group-info" class="gi-btn" style="display:none" onclick="openGroupInfo()" title="群信息">ⓘ</button>
+      <button id="btn-group-info" class="gi-btn" style="display:none" onclick="openGroupInfo()" title="群信息" aria-label="群信息">ⓘ</button>
     </div>
 
     <div id="filter-bar" class="filter-bar" style="display:none">
-      <input type="text" id="filter-keyword" placeholder="搜索消息内容..." autocomplete="off">
-      <input type="date" id="filter-date-start" title="开始日期">
+      <input type="text" id="filter-keyword" placeholder="搜索消息内容..." autocomplete="off" aria-label="搜索消息内容">
+      <input type="date" id="filter-date-start" title="开始日期" aria-label="开始日期">
       <span class="date-sep">—</span>
-      <input type="date" id="filter-date-end" title="结束日期">
-      <select id="filter-type">
+      <input type="date" id="filter-date-end" title="结束日期" aria-label="结束日期">
+      <select id="filter-type" aria-label="消息类型筛选">
         <option value="">全部类型</option>
         <option value="1">文本</option>
         <option value="3">图片</option>
@@ -119,23 +119,23 @@ window.WhisperTranscriber = {
         <option value="50">网络电话</option>
         <option value="10000,10002">系统消息</option>
       </select>
-      <select id="filter-sender"><option value="">全部发送者</option></select>
+      <select id="filter-sender" aria-label="发送者筛选"><option value="">全部发送者</option></select>
       <span id="filter-result-count" class="filter-result-count"></span>
     </div>
 
-    <div id="message-list" class="message-list" style="display:none"></div>
+    <div id="message-list" class="message-list" style="display:none" aria-live="polite" aria-label="消息列表"></div>
 
     <div id="pagination-bar" class="pagination-bar" style="display:none">
       <div class="pagination-controls">
-        <button id="btn-first" class="pg-btn" title="首页">&#171;</button>
-        <button id="btn-prev" class="pg-btn" title="上页">&#8249;</button>
+        <button id="btn-first" class="pg-btn" title="首页" aria-label="首页">&#171;</button>
+        <button id="btn-prev" class="pg-btn" title="上页" aria-label="上一页">&#8249;</button>
         <span id="page-numbers" class="page-numbers"></span>
-        <button id="btn-next" class="pg-btn" title="下页">&#8250;</button>
-        <button id="btn-last" class="pg-btn" title="末页">&#187;</button>
+        <button id="btn-next" class="pg-btn" title="下页" aria-label="下一页">&#8250;</button>
+        <button id="btn-last" class="pg-btn" title="末页" aria-label="末页">&#187;</button>
       </div>
       <div class="pagination-jump">
         <span>&#x1f4c5;</span>
-        <input type="date" id="jump-date" title="跳转到日期">
+        <input type="date" id="jump-date" title="跳转到日期" aria-label="跳转到日期">
         <button id="btn-jump-date" class="pg-btn">跳转</button>
       </div>
       <div class="pagination-info" id="pagination-info"></div>
@@ -145,16 +145,16 @@ window.WhisperTranscriber = {
 
 <!-- Group Info Panel (slide-in from right) -->
 <div id="group-info-backdrop" class="group-info-backdrop" style="display:none" onclick="closeGroupInfo()"></div>
-<div id="group-info-panel" class="group-info-panel" style="display:none">
+<div id="group-info-panel" class="group-info-panel" style="display:none" role="dialog" aria-modal="true" aria-label="群详情面板" aria-hidden="true">
   <div class="gi-header">
-    <span class="gi-close" onclick="closeGroupInfo()">&times;</span>
+    <span class="gi-close" onclick="closeGroupInfo()" role="button" tabindex="0" aria-label="关闭群详情">&times;</span>
     <span style="color:#8b949e;font-size:12px">群详情</span>
   </div>
   <div id="group-info-content"></div>
 </div>
 
-<div id="lightbox" class="lightbox" style="display:none" onclick="this.style.display='none'">
-  <span class="lightbox-close">&times;</span>
+<div id="lightbox" class="lightbox" style="display:none" onclick="this.style.display='none'" role="dialog" aria-modal="true" aria-label="图片预览" aria-hidden="true">
+  <span class="lightbox-close" role="button" aria-label="关闭图片预览">&times;</span>
   <img id="lightbox-img" src="" alt="">
 </div>
 

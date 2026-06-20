@@ -29,7 +29,7 @@
 document.getElementById('btn-run').addEventListener('click', () => {
   const fileInput = document.getElementById('cfg-excel');
   const file = fileInput.files[0];
-  if (!file) { alert('请选择 Excel 文件'); return; }
+  if (!file) { showToast('请选择 Excel 文件', 'warning'); return; }
 
   const formData = new FormData();
   formData.append('file', file);
@@ -53,7 +53,7 @@ document.getElementById('btn-run').addEventListener('click', () => {
       btn.disabled = false;
     })
     .catch(err => {
-      alert('导出失败: ' + err.message);
+      showToast('导出失败: ' + err.message, 'error');
       btn.disabled = false;
     });
 });

@@ -2,7 +2,7 @@
 class CleanupList extends Component {
   template(data) {
     if (data.loading) {
-      return '<div class="loading"><div class="loading-icon">&#x23f3;</div>分析聊天占用空间...</div>';
+      showSkeleton(this.el, 6); return '';
     }
     if (data.error) {
       return '<div class="error-msg">&#x26a0; ' + escapeHtml(data.error) +

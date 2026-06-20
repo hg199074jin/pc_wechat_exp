@@ -3,14 +3,14 @@
 {% block content %}
 <a href="/" class="back-link">← 返回仪表盘</a>
 <h2 style="margin:0 0 4px 0">📦 一键备份</h2>
-<p style="color:#8b949e;font-size:12px;margin:0 0 20px 0">扫描 → 解密 → 迁移媒体 → 构建索引</p>
+<p style="color:#8b949e;font-size:12px;margin:0 0 20px 0">扫描 → 解密 → 迁移图片 → 构建索引</p>
 
 <div class="steps-bar" id="steps-bar">
   <span class="step-item active" data-stage="scan"><span>①</span> 扫描账号</span>
   <span class="step-arrow">→</span>
   <span class="step-item" data-stage="decrypt"><span>②</span> 解密数据库</span>
   <span class="step-arrow">→</span>
-  <span class="step-item" data-stage="migrate"><span>③</span> 迁移媒体</span>
+  <span class="step-item" data-stage="migrate"><span>③</span> 迁移图片</span>
   <span class="step-arrow">→</span>
   <span class="step-item" data-stage="index"><span>④</span> 构建索引</span>
 </div>
@@ -119,7 +119,7 @@ page.showResult = function(result) {
   let html = '<dl class="result-stats">';
   if (stats.decrypted !== undefined) html += '<dt>解密数据库</dt><dd>' + stats.decrypted + ' 个</dd>';
   if (stats.migrated) {
-    html += '<dt>媒体文件</dt><dd>硬链接 ' + (stats.migrated.hardlinked || 0) + ' | 复制 ' + (stats.migrated.copied || 0) + ' | 跳过 ' + (stats.migrated.skipped || 0) + '</dd>';
+    html += '<dt>聊天图片</dt><dd>硬链接 ' + (stats.migrated.hardlinked || 0) + ' | 复制 ' + (stats.migrated.copied || 0) + ' | 未迁移的非图片 ' + (stats.migrated.skipped_non_image || 0) + '</dd>';
   }
   if (stats.indexed) html += '<dt>搜索索引</dt><dd>' + stats.indexed + '</dd>';
   if (hasErrors) {

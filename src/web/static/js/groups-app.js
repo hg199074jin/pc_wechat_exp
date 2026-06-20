@@ -1,6 +1,11 @@
 /**
  * 群管理页面逻辑.
  */
+function _gf(url, opts = {}) {
+  opts.headers = Object.assign({ 'X-Requested-With': 'XMLHttpRequest' }, opts.headers || {});
+  return fetch(url, opts);
+}
+
 const GroupsApp = {
   CACHE_KEY: 'wechat_group_names',
   CACHE_TTL: 7 * 24 * 3600 * 1000,
@@ -196,7 +201,7 @@ const GroupsApp = {
 
   async _loadBlacklist() {
     try {
-      const r = await fetch('/api/address-book/groups/blacklist');
+      const r = await _gf('/api/address-book/groups/blacklist');
       if (!r.ok) return;
       const data = await r.json();
       this.blacklist = data.blacklist || [];
@@ -207,7 +212,7 @@ const GroupsApp = {
 
   async _loadTagsData() {
     try {
-      const r = await fetch('/api/analysis/tags');
+      const r = await _gf('/api/analysis/tags');
       if (!r.ok) return;
       const data = await r.json();
       this.tags = data.tags || [];
@@ -475,7 +480,7 @@ const GroupsApp = {
 
   async _buildNameMap() {
     try {
-      const r = await fetch(`/api/address-book/groups/stream?${this._loadWindowQuery()}`);
+      const r = await _gf(`/api/address-book/groups/stream?${this._loadWindowQuery()}`);
       if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`);
       const reader = r.body.getReader();
       const decoder = new TextDecoder();
@@ -505,7 +510,7 @@ const GroupsApp = {
       }
     } catch (e) {
       console.error('_buildNameMap failed:', e);
-      const fallback = await fetch(`/api/address-book/groups?${this._loadWindowQuery()}`);
+      const fallback = await _gf(`/api/address-book/groups?${this._loadWindowQuery()}`);
       const data = await fallback.json();
       this._allGroups = data.groups || [];
       this._rememberGroups(this._allGroups);
@@ -521,7 +526,7 @@ const GroupsApp = {
       const extra = {};
       if (activity) extra.activity = '1';
       if (options.force) extra.force = '1';
-      const r = await fetch(`/api/address-book/groups?${this._loadWindowQuery(extra)}`);
+      const r = await _gf(`/api/address-book/groups?${this._loadWindowQuery(extra)}`);
       if (!r.ok) return;
       const data = await r.json();
       if (!Array.isArray(data.groups)) return;
@@ -627,11 +632,11 @@ const GroupsApp = {
   async _addSelectedToBlacklist() {
     if (this.selectedTagPath !== null) return;
     const checked = [...document.querySelectorAll('#group-items input:checked')].map(cb => cb.dataset.wxid);
-    if (checked.length === 0) { alert('请先勾选要加入黑名单的群'); return; }
+    if (checked.length === 0) { showToast('请先勾选要加入黑名单的群', 'warning'); return; }
     if (!confirm(`将 ${checked.length} 个群加入黑名单？这些群之后不会参与群管理加载。`)) return;
     const groups = checked.map(wxid => this._groupRecord(wxid));
     try {
-      const r = await fetch('/api/address-book/groups/blacklist', {
+      const r = await _gf('/api/address-book/groups/blacklist', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({groups}),
@@ -645,7 +650,7 @@ const GroupsApp = {
       this._saveNameMapCache();
       this.render();
     } catch (e) {
-      alert('加入黑名单失败：' + e.message);
+      showToast('加入黑名单失败：' + e.message, 'error');
     }
   },
 
@@ -680,7 +685,7 @@ const GroupsApp = {
   async _removeFromBlacklist(wxid) {
     if (!wxid) return;
     try {
-      const r = await fetch(`/api/address-book/groups/blacklist?wxid=${encodeURIComponent(wxid)}`, {method: 'DELETE'});
+      const r = await _gf(`/api/address-book/groups/blacklist?wxid=${encodeURIComponent(wxid)}`, {method: 'DELETE'});
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       this.blacklist = data.blacklist || [];
@@ -691,7 +696,7 @@ const GroupsApp = {
       this.render();
       this._refreshGroupData({force: true, activity: this.sortKey === 'active_3d'}).catch(() => {});
     } catch (e) {
-      alert('移出黑名单失败：' + e.message);
+      showToast('移出黑名单失败：' + e.message, 'error');
     }
   },
 
@@ -704,7 +709,7 @@ const GroupsApp = {
     fill.style.width = '0%';
     text.textContent = '开始 AI 分类...';
     try {
-      const r = await fetch('/api/analysis/tags/auto-classify', {method: 'POST'});
+      const r = await _gf('/api/analysis/tags/auto-classify', {method: 'POST'});
       const reader = r.body.getReader();
       const decoder = new TextDecoder();
       let buf = '';
@@ -748,7 +753,7 @@ const GroupsApp = {
   // ----- Save -----
   async save(options = {}) {
     const silent = !!options.silent;
-    const r = await fetch('/api/analysis/tags', {
+    const r = await _gf('/api/analysis/tags', {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({tags: this.tags}),
@@ -758,11 +763,11 @@ const GroupsApp = {
       const btn = document.getElementById('save-btn');
       if (btn) btn.textContent = silent ? '已自动保存' : '💾 保存修改';
       if (!silent) {
-        alert('已保存');
+        showToast('已保存', 'success');
         this.loadTags();
       }
     } else {
-      if (!silent) alert('保存失败');
+      if (!silent) showToast('保存失败', 'error');
       const btn = document.getElementById('save-btn');
       if (btn) btn.textContent = '保存失败';
     }
@@ -924,9 +929,9 @@ const GroupsApp = {
     }
     document.getElementById('move-selected-btn').onclick = () => {
       const target = document.getElementById('move-target').value;
-      if (!target) { alert('请先选择目标标签'); return; }
+      if (!target) { showToast('请先选择目标标签', 'warning'); return; }
       const checked = [...document.querySelectorAll('#group-items input:checked')].map(cb => cb.dataset.wxid);
-      if (checked.length === 0) { alert('请先勾选要移动的群'); return; }
+      if (checked.length === 0) { showToast('请先勾选要移动的群', 'warning'); return; }
       this._moveChatIdsTo(checked, target);
     };
     document.getElementById('group-items').addEventListener('click', (e) => {

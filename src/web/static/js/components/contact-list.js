@@ -3,7 +3,7 @@ class ContactList extends Component {
   template(data) {
     // data = { contacts, activeId, loading, searchQuery }
     if (data.loading) {
-      return '<div class="loading"><div class="loading-icon">⏳</div>正在加载联系人...</div>';
+      showSkeleton(this.el, 8); return '';
     }
     if (!data.contacts || !data.contacts.length) {
       if (data.searchQuery) {
@@ -12,7 +12,7 @@ class ContactList extends Component {
       return '<div class="empty-msg">暂无聊天记录可用<div class="hint">请先在主菜单执行 <b>[3] 解密数据库</b><br>确保微信已登录并完成解密后再试</div></div>';
     }
     return data.contacts.map(c => `
-      <div class="contact-item${c.id === data.activeId ? ' active' : ''}" data-id="${escapeAttr(c.id)}">
+      <div class="contact-item${c.id === data.activeId ? ' active' : ''}" data-id="${escapeAttr(c.id)}" tabindex="0" role="option" aria-selected="${c.id === data.activeId}">
         <img class="contact-avatar" src="${c.avatar_url || ''}"
              onerror="this.onerror=null;this.outerHTML='<div class=\\'contact-avatar-fallback\\' style=\\'width:40px;height:40px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:white;flex-shrink:0;background:'+_avatarColor('${c.id.replace(/'/g,"\\'")}')+'\\'>'+_avatarChar('${(c.name||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/'/g,"\\'")}')+'</div>'"
              loading="lazy" alt="" />

@@ -8,13 +8,13 @@
 <div id="contacts-app">
   <aside id="contacts-sidebar">
     <div class="contacts-search-bar">
-      <input type="text" id="contacts-search" placeholder="搜索姓名、备注、昵称、别名..." autocomplete="off">
+      <input type="text" id="contacts-search" placeholder="搜索姓名、备注、昵称、别名..." autocomplete="off" aria-label="搜索联系人">
     </div>
     <div class="contacts-tabs" id="contacts-tabs">
       <button class="contacts-tab active" data-tab="contacts">联系人</button>
       <button class="contacts-tab" data-tab="groups">群聊</button>
     </div>
-    <div class="contacts-list" id="contacts-list"></div>
+    <div class="contacts-list" id="contacts-list" aria-live="polite" aria-label="联系人列表"></div>
   </aside>
   <main id="contacts-detail">
     <div class="detail-placeholder">

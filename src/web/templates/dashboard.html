@@ -1,11 +1,97 @@
 {% extends "base.html" %}
 {% block title %}WeChat EXP — 仪表盘{% endblock %}
 {% block content %}
+<div id="system-status" style="display:none;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px 20px;margin-bottom:20px;">
+  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+    <span id="status-icon" style="font-size:20px;"></span>
+    <span id="status-text" style="font-size:14px;color:#c9d1d9;"></span>
+    <span id="status-version" style="font-size:12px;color:#8b949e;margin-left:auto;"></span>
+  </div>
+  <div id="status-details" style="display:flex;gap:24px;margin-top:10px;font-size:12px;color:#8b949e;flex-wrap:wrap;"></div>
+</div>
+<script>
+fetch('/api/system/status').then(r=>r.json()).then(d=>{
+  const box=document.getElementById('system-status');
+  box.style.display='block';
+  const icon=document.getElementById('status-icon');
+  const text=document.getElementById('status-text');
+  const ver=document.getElementById('status-version');
+  const det=document.getElementById('status-details');
+  if(d.has_data){
+    icon.textContent='✅';
+    text.innerHTML='<span style="color:#3fb950">数据就绪</span> — '+d.db_count+' 个数据库 ('+d.db_size_mb+' MB)';
+  }else{
+    icon.textContent='⚠️';
+    text.innerHTML='<span style="color:#d29922">未找到解密数据</span> — 请先执行<a href="/backup" style="color:#58a6ff;text-decoration:none;">一键备份</a>';
+  }
+  ver.textContent='v'+d.version;
+  let details=[];
+  if(d.has_contacts) details.push('📇 通讯录已加载');
+  if(d.has_media) details.push('🖼 媒体文件已迁移');
+  if(d.knowledge_count>0) details.push('📚 '+d.knowledge_count+' 条知识卡片');
+  if(d.backup_dir) details.push('💾 备份目录: '+d.backup_dir.split(/[\\/]/).pop());
+  det.innerHTML=details.map(d=>'<span>'+d+'</span>').join('');
+}).catch(()=>{});
+</script>
+<div id="onboarding" style="display:none;background:linear-gradient(135deg,#1a2332,#161b22);border:1px solid #58a6ff;border-radius:8px;padding:20px 24px;margin-bottom:20px;">
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span style="font-size:28px;">👋</span>
+    <div>
+      <div style="font-size:15px;font-weight:600;color:#c9d1d9;">欢迎使用 WeChat EXP</div>
+      <div style="font-size:13px;color:#8b949e;margin-top:4px;">首次使用？按以下步骤开始：</div>
+    </div>
+    <button onclick="this.closest('#onboarding').style.display='none';localStorage.setItem('onboarding_dismissed','1')" style="margin-left:auto;background:none;border:none;color:#8b949e;cursor:pointer;font-size:18px;" aria-label="关闭引导">✕</button>
+  </div>
+  <div style="display:flex;gap:16px;margin-top:16px;flex-wrap:wrap;">
+    <a href="/backup" style="display:flex;align-items:center;gap:8px;background:#21262d;border:1px solid #30363d;border-radius:6px;padding:12px 16px;text-decoration:none;color:#c9d1d9;flex:1;min-width:200px;">
+      <span style="font-size:20px;">①</span>
+      <div><div style="font-weight:600;">备份数据</div><div style="font-size:11px;color:#8b949e;">扫描并解密微信数据库</div></div>
+    </a>
+    <a href="/keyscan" style="display:flex;align-items:center;gap:8px;background:#21262d;border:1px solid #30363d;border-radius:6px;padding:12px 16px;text-decoration:none;color:#c9d1d9;flex:1;min-width:200px;">
+      <span style="font-size:20px;">②</span>
+      <div><div style="font-weight:600;">提取密钥</div><div style="font-size:11px;color:#8b949e;">从微信进程获取解密密钥</div></div>
+    </a>
+    <a href="/chat" style="display:flex;align-items:center;gap:8px;background:#21262d;border:1px solid #30363d;border-radius:6px;padding:12px 16px;text-decoration:none;color:#c9d1d9;flex:1;min-width:200px;">
+      <span style="font-size:20px;">③</span>
+      <div><div style="font-weight:600;">开始浏览</div><div style="font-size:11px;color:#8b949e;">查看聊天记录和分析报告</div></div>
+    </a>
+  </div>
+</div>
+<script>
+if(!localStorage.getItem('onboarding_dismissed')){document.getElementById('onboarding').style.display='block';}
+</script>
+<div id="data-stats" style="display:none;display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:24px;font-weight:700;color:#58a6ff;" id="stat-msgs">-</div>
+    <div style="font-size:12px;color:#8b949e;margin-top:4px;">数据库</div>
+  </div>
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:24px;font-weight:700;color:#3fb950;" id="stat-size">-</div>
+    <div style="font-size:12px;color:#8b949e;margin-top:4px;">数据大小</div>
+  </div>
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:24px;font-weight:700;color:#d29922;" id="stat-contacts">-</div>
+    <div style="font-size:12px;color:#8b949e;margin-top:4px;">通讯录</div>
+  </div>
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:24px;font-weight:700;color:#f0883e;" id="stat-knowledge">-</div>
+    <div style="font-size:12px;color:#8b949e;margin-top:4px;">知识卡片</div>
+  </div>
+</div>
+<script>
+fetch('/api/system/status').then(r=>r.json()).then(d=>{
+  document.getElementById('data-stats').style.display='grid';
+  document.getElementById('stat-msgs').textContent=d.db_count||0;
+  document.getElementById('stat-size').textContent=d.db_size_mb?d.db_size_mb+'MB':'0';
+  document.getElementById('stat-contacts').textContent=d.has_contacts?'✓':'✗';
+  document.getElementById('stat-knowledge').textContent=d.knowledge_count||0;
+}).catch(()=>{});
+</script>
 <div class="dashboard-section">
   <h2>数据采集</h2>
   <p class="section-subtitle">一键备份微信聊天数据</p>
   <div class="dashboard-grid">
-    <a href="/backup" class="dashboard-card">
+    <a href="/backup" class="dashboard-card" title="完整备份流程：自动检测微信目录 → 扫描数据库 → 提取密钥 → 解密 → 迁移媒体文件 → 构建搜索索引">
       <div class="card-icon">📦</div>
       <div class="card-title">一键备份</div>
       <div class="card-desc">扫描 → 解密 → 迁移媒体 → 构建索引，完整备份微信数据</div>
@@ -17,27 +103,27 @@
   <h2>浏览与分析</h2>
   <p class="section-subtitle">查看聊天记录</p>
   <div class="dashboard-grid">
-    <a href="/chat" class="dashboard-card">
+    <a href="/chat" class="dashboard-card" title="浏览解密后的聊天记录，支持按联系人/群聊筛选、关键词搜索、消息类型过滤、图片/视频/语音在线播放">
       <div class="card-icon">💬</div>
       <div class="card-title">聊天查看器</div>
       <div class="card-desc">浏览所有聊天记录，支持搜索、筛选、图片/视频/语音播放</div>
     </a>
-    <a href="/analysis" class="dashboard-card">
+    <a href="/analysis" class="dashboard-card" title="使用 LLM 自动分析群聊内容，生成总结报告、话题摘要、知识候选，支持定时自动分析">
       <div class="card-icon">🤖</div>
       <div class="card-title">AI 群聊分析</div>
       <div class="card-desc">AI 自动分析群聊内容，输出总结+话题摘要卡片，支持定时任务</div>
     </a>
-    <a href="/groups" class="dashboard-card">
+    <a href="/groups" class="dashboard-card" title="按标签分类管理群聊，支持 AI 智能分类、手动拖拽、黑名单管理">
       <div class="card-icon">🏷️</div>
       <div class="card-title">群管理</div>
       <div class="card-desc">管理群聊标签分类，支持 AI 自动分类和手动调整</div>
     </a>
-    <a href="/contacts" class="dashboard-card">
+    <a href="/contacts" class="dashboard-card" title="浏览从 contact.db 解析的完整通讯录，支持姓名/备注/昵称搜索，查看联系人和群聊详情">
       <div class="card-icon">📋</div>
       <div class="card-title">通讯录</div>
       <div class="card-desc">浏览完整微信通讯录，按姓名/备注搜索，查看联系人详情</div>
     </a>
-    <a href="/knowledge" class="dashboard-card">
+    <a href="/knowledge" class="dashboard-card" title="从群聊中自动发现高价值知识卡片，支持评分筛选、生命周期管理、Obsidian 同步、Agent 规则生成">
       <div class="card-icon">📡</div>
       <div class="card-title">知识沉淀雷达</div>
       <div class="card-desc">从群聊中自动发现高价值知识，生成可复用卡片，支持溯源和转化</div>
@@ -49,17 +135,17 @@
   <h2>导出</h2>
   <p class="section-subtitle">聊天记录、报告与员工报表导出</p>
   <div class="dashboard-grid">
-    <a href="/export" class="dashboard-card">
+    <a href="/export" class="dashboard-card" title="按联系人名称/wxid + 时间范围导出聊天记录，支持 TXT 纯文本和 HTML 网页两种格式">
       <div class="card-icon">📤</div>
       <div class="card-title">聊天导出</div>
       <div class="card-desc">按联系人、时间范围导出聊天记录为 TXT/HTML 格式</div>
     </a>
-    <a href="/employee" class="dashboard-card">
+    <a href="/employee" class="dashboard-card" title="上传包含员工姓名的 Excel 文件，自动匹配微信通讯录中的联系人，批量导出对应聊天记录">
       <div class="card-icon">👤</div>
       <div class="card-title">员工报表</div>
       <div class="card-desc">上传员工 Excel，批量匹配微信联系人并导出聊天</div>
     </a>
-    <a href="/report" class="dashboard-card">
+    <a href="/report" class="dashboard-card" title="生成年度综合数据报告，包含消息统计概览、类型分布饼图、活跃趋势折线图、时段热力图">
       <div class="card-icon">📄</div>
       <div class="card-title">综合报告</div>
       <div class="card-desc">生成 HTML 综合数据报告：概览卡片 + 饼图 + 趋势 + 热力图</div>
@@ -71,20 +157,25 @@
   <h2>工具</h2>
   <p class="section-subtitle">垃圾清理、密钥提取与数据库解密</p>
   <div class="dashboard-grid">
-    <a href="/cleanup" class="dashboard-card">
+    <a href="/cleanup" class="dashboard-card" title="分析各聊天的空间占用，按时间范围和消息类型筛选后批量删除源数据，有 3 阶段确认流程防误删">
       <div class="card-icon">🗑️</div>
       <div class="card-title">垃圾清理</div>
       <div class="card-desc">按聊天/空间占用批量删除源微信数据，释放磁盘空间</div>
     </a>
-    <a href="/keyscan" class="dashboard-card">
+    <a href="/keyscan" class="dashboard-card" title="从正在运行的微信进程内存中扫描 SQLCipher 4 数据库加密密钥，需要微信已登录且正在运行">
       <div class="card-icon">🔑</div>
       <div class="card-title">提取密钥</div>
       <div class="card-desc">从微信进程内存中提取数据库解密密钥</div>
     </a>
-    <a href="/decrypt" class="dashboard-card">
+    <a href="/decrypt" class="dashboard-card" title="使用已提取的密钥批量解密微信数据库文件，输出可直接用 SQLite 打开的解密数据库">
       <div class="card-icon">🔓</div>
       <div class="card-title">解密数据库</div>
       <div class="card-desc">使用已有密钥批量解密微信聊天数据库</div>
+    </a>
+    <a href="/settings" class="dashboard-card" title="管理 LLM API 配置、Obsidian 同步路径、备份设置等应用参数">
+      <div class="card-icon">⚙️</div>
+      <div class="card-title">设置</div>
+      <div class="card-desc">管理 LLM 配置、存储路径和应用设置</div>
     </a>
   </div>
 </div>

@@ -7,7 +7,10 @@ function cancelPending() {
 }
 
 async function fetchJSON(url, signal) {
-  const resp = await fetch(url, { signal });
+  const resp = await fetch(url, {
+    signal,
+    headers: { 'X-Requested-With': 'XMLHttpRequest' },
+  });
   if (!resp.ok) {
     let msg = `HTTP ${resp.status}`;
     try {
@@ -82,7 +85,7 @@ const api = {
     const signal = cancelPending();
     return fetch('/api/cleanup/preview', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify(params),
       signal: signal,
     }).then(function(resp) {
@@ -94,7 +97,7 @@ const api = {
     const signal = cancelPending();
     return fetch('/api/cleanup/execute', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify(params),
       signal: signal,
     }).then(function(resp) {

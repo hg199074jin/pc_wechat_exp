@@ -1,4 +1,9 @@
 /* Knowledge Radar — inbox UI */
+function _kf(url, opts = {}) {
+  opts.headers = Object.assign({ 'X-Requested-With': 'XMLHttpRequest' }, opts.headers || {});
+  return fetch(url, opts);
+}
+
 const KnowledgeApp = {
   cards: [],
   tags: [],
@@ -82,7 +87,7 @@ const KnowledgeApp = {
 
   async loadStats() {
     try {
-      const r = await fetch('/api/knowledge/stats');
+      const r = await _kf('/api/knowledge/stats');
       const data = await r.json();
       document.getElementById('count-all').textContent = data.total || 0;
       const bs = data.by_status || {};
@@ -109,7 +114,7 @@ const KnowledgeApp = {
     params.set('limit', '200');
 
     try {
-      const r = await fetch('/api/knowledge/cards?' + params.toString());
+      const r = await _kf('/api/knowledge/cards?' + params.toString());
       const data = await r.json();
       this.cards = data.cards || [];
       this.renderCards();
@@ -121,7 +126,7 @@ const KnowledgeApp = {
 
   async loadTags() {
     try {
-      const r = await fetch('/api/knowledge/tags');
+      const r = await _kf('/api/knowledge/tags');
       const data = await r.json();
       this.tags = data.tags || [];
       this.renderTagFilter();
@@ -142,7 +147,7 @@ const KnowledgeApp = {
 
   async loadSchedules() {
     try {
-      const r = await fetch('/api/knowledge/schedules');
+      const r = await _kf('/api/knowledge/schedules');
       const data = await r.json();
       this.renderSchedules(data.schedules || []);
     } catch (e) { /* ignore */ }
@@ -159,7 +164,16 @@ const KnowledgeApp = {
       root.innerHTML = '<div class="empty-state">暂无知识卡片<br><small>点击左侧"扫描知识"开始提取</small></div>';
       return;
     }
-    root.innerHTML = this.cards.map(c => this.renderCard(c)).join('');
+    // Data quality indicator
+    const total = this.cards.length;
+    const avgScore = Math.round(this.cards.reduce((s, c) => s + (c.score || 0), 0) / total);
+    const withSources = this.cards.filter(c => c.sources && c.sources.length > 0).length;
+    let indicator = `<div style="padding:8px 12px;font-size:12px;color:#8b949e;border-bottom:1px solid #21262d;display:flex;gap:16px;flex-wrap:wrap;">`;
+    indicator += `<span>📊 共 ${total} 条卡片</span>`;
+    indicator += `<span>📈 平均评分 ${avgScore}</span>`;
+    indicator += `<span>🔗 ${withSources}/${total} 有来源溯源</span>`;
+    indicator += `</div>`;
+    root.innerHTML = indicator + this.cards.map(c => this.renderCard(c)).join('');
     this._syncBulkCheckboxes();
   },
 
@@ -174,7 +188,7 @@ const KnowledgeApp = {
       inbox: '⏳ 待沉淀', saved: '⭐ 已收藏', archived: '📦 已归档', rejected: '🚫 已忽略',
     };
     return `
-      <article class="knowledge-card" data-card-id="${this.esc(c.id)}">
+      <article class="knowledge-card" data-card-id="${this.esc(c.id)}" tabindex="0" role="article" aria-label="${this.esc(c.title)}">
         <div class="knowledge-card-header">
           <div style="flex:1;min-width:0">
             <h3 data-action="detail">${this.esc(c.title)}</h3>
@@ -267,7 +281,7 @@ const KnowledgeApp = {
       await this.updateCard(cardId, { status: newStatus });
     } else if (action === 'delete') {
       if (!confirm('确定删除此知识卡片？')) return;
-      await fetch('/api/knowledge/cards/' + cardId, { method: 'DELETE' });
+      await _kf('/api/knowledge/cards/' + cardId, { method: 'DELETE' });
       this.loadCards();
       this.loadStats();
     } else if (action === 'convert-menu') {
@@ -294,7 +308,7 @@ const KnowledgeApp = {
   },
 
   async updateCard(cardId, updates) {
-    await fetch('/api/knowledge/cards/' + cardId, {
+    await _kf('/api/knowledge/cards/' + cardId, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates),
@@ -308,22 +322,22 @@ const KnowledgeApp = {
       audit_case: '审计案例', sop: 'SOP', prompt: '提示词', faq: 'FAQ', article: '文章素材', script: '话术',
     };
     try {
-      const r = await fetch('/api/knowledge/cards/' + cardId + '/convert', {
+      const r = await _kf('/api/knowledge/cards/' + cardId + '/convert', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_type: targetType }),
       });
       const data = await r.json();
       if (!r.ok) {
-        alert('转化失败: ' + (data.error || ''));
+        showToast('转化失败: ' + (data.error || ''), 'error');
         return;
       }
       // Conversion now creates a derivative; the original card is unchanged.
-      alert('已生成 ' + (typeLabels[targetType] || targetType) + ' 转化（原卡内容保留不变）');
+      showToast('已生成 ' + (typeLabels[targetType] || targetType) + ' 转化（原卡内容保留不变）', 'success');
       if (this._detailCardId === cardId) this.showDetail(cardId);
       this.loadCards();
     } catch (e) {
-      alert('转化失败: ' + e.message);
+      showToast('转化失败: ' + e.message, 'error');
     }
   },
 
@@ -335,12 +349,12 @@ const KnowledgeApp = {
     this._detailCardId = cardId;
     try {
       const [cardR, derivR, rulesR] = await Promise.all([
-        fetch('/api/knowledge/cards/' + cardId),
-        fetch('/api/knowledge/cards/' + cardId + '/derivatives'),
-        fetch('/api/knowledge/cards/' + cardId + '/agent-rules'),
+        _kf('/api/knowledge/cards/' + cardId),
+        _kf('/api/knowledge/cards/' + cardId + '/derivatives'),
+        _kf('/api/knowledge/cards/' + cardId + '/agent-rules'),
       ]);
       const card = await cardR.json();
-      if (card.error) { alert('加载失败'); return; }
+      if (card.error) { showToast('加载失败', 'error'); return; }
       const derivatives = (await derivR.json()).derivatives || [];
       const rules = (await rulesR.json()).rules || [];
       const typeLabels = {
@@ -417,7 +431,7 @@ const KnowledgeApp = {
       content.innerHTML = html;
       document.getElementById('detail-modal').classList.add('show');
     } catch (e) {
-      alert('加载详情失败: ' + e.message);
+      showToast('加载详情失败: ' + e.message, 'error');
     }
   },
 
@@ -459,27 +473,27 @@ const KnowledgeApp = {
 
   async updateLifecycle(cardId, stage) {
     try {
-      const r = await fetch('/api/knowledge/cards/' + cardId + '/lifecycle', {
+      const r = await _kf('/api/knowledge/cards/' + cardId + '/lifecycle', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lifecycle_stage: stage }),
       });
       const data = await r.json();
-      if (!r.ok) { alert(data.error || '失败'); return; }
+      if (!r.ok) { showToast(data.error || '失败', 'error'); return; }
       this.loadCards();
       if (this._detailCardId === cardId) this.showDetail(cardId);
-    } catch (e) { alert('失败: ' + e.message); }
+    } catch (e) { showToast('失败: ' + e.message, 'error'); }
   },
 
   async generateMyVersion(cardId) {
     if (this._busy) return;
     this._busy = true;
     try {
-      const r = await fetch('/api/knowledge/cards/' + cardId + '/my-version', { method: 'POST' });
+      const r = await _kf('/api/knowledge/cards/' + cardId + '/my-version', { method: 'POST' });
       const data = await r.json();
-      if (!r.ok) { alert(data.error || '生成失败'); return; }
-      alert('已生成"我的版本"（原卡保留不变）');
+      if (!r.ok) { showToast(data.error || '生成失败', 'error'); return; }
+      showToast('已生成"我的版本"（原卡保留不变）', 'success');
       if (this._detailCardId === cardId) this.showDetail(cardId);
-    } catch (e) { alert('生成失败: ' + e.message); }
+    } catch (e) { showToast('生成失败: ' + e.message, 'error'); }
     finally { this._busy = false; }
   },
 
@@ -487,13 +501,13 @@ const KnowledgeApp = {
     if (this._busy) return;
     this._busy = true;
     try {
-      const r = await fetch('/api/knowledge/cards/' + cardId + '/agent-rules/draft', { method: 'POST' });
+      const r = await _kf('/api/knowledge/cards/' + cardId + '/agent-rules/draft', { method: 'POST' });
       const data = await r.json();
-      if (!r.ok) { alert(data.error || '生成失败'); return; }
-      alert('已生成规则草案，请在详情中编辑后发布');
+      if (!r.ok) { showToast(data.error || '生成失败', 'error'); return; }
+      showToast('已生成规则草案，请在详情中编辑后发布', 'success');
       if (this._detailCardId === cardId) this.showDetail(cardId);
       this.loadAgentRuleStats();
-    } catch (e) { alert('生成失败: ' + e.message); }
+    } catch (e) { showToast('生成失败: ' + e.message, 'error'); }
     finally { this._busy = false; }
   },
 
@@ -504,43 +518,43 @@ const KnowledgeApp = {
     const category = block.querySelector('.rule-category').value;
     const content_md = block.querySelector('.rule-content').value;
     try {
-      const r = await fetch('/api/knowledge/agent-rules/' + ruleId, {
+      const r = await _kf('/api/knowledge/agent-rules/' + ruleId, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, category, content_md }),
       });
       const data = await r.json();
-      if (!r.ok) { alert(data.error || '保存失败'); return; }
-      alert('草案已保存（v' + data.rule.version + '）');
-    } catch (e) { alert('保存失败: ' + e.message); }
+      if (!r.ok) { showToast(data.error || '保存失败', 'error'); return; }
+      showToast('草案已保存（v' + data.rule.version + '）', 'success');
+    } catch (e) { showToast('保存失败: ' + e.message, 'error'); }
   },
 
   async publishRule(ruleId) {
     if (!confirm('发布该规则？发布后会同步到 vault 的 published/ 目录。')) return;
     try {
-      const r = await fetch('/api/knowledge/agent-rules/' + ruleId + '/publish', { method: 'POST' });
+      const r = await _kf('/api/knowledge/agent-rules/' + ruleId + '/publish', { method: 'POST' });
       const data = await r.json();
-      if (!r.ok) { alert(data.error || '发布失败'); return; }
-      alert('已发布');
+      if (!r.ok) { showToast(data.error || '发布失败', 'error'); return; }
+      showToast('已发布', 'success');
       if (this._detailCardId) this.showDetail(this._detailCardId);
       this.loadAgentRuleStats();
-    } catch (e) { alert('发布失败: ' + e.message); }
+    } catch (e) { showToast('发布失败: ' + e.message, 'error'); }
   },
 
   async archiveRule(ruleId) {
     if (!confirm('归档该规则？')) return;
     try {
-      const r = await fetch('/api/knowledge/agent-rules/' + ruleId + '/archive', { method: 'POST' });
-      if (!r.ok) { alert('归档失败'); return; }
+      const r = await _kf('/api/knowledge/agent-rules/' + ruleId + '/archive', { method: 'POST' });
+      if (!r.ok) { showToast('归档失败', 'error'); return; }
       if (this._detailCardId) this.showDetail(this._detailCardId);
       this.loadAgentRuleStats();
-    } catch (e) { alert('归档失败: ' + e.message); }
+    } catch (e) { showToast('归档失败: ' + e.message, 'error'); }
   },
 
   async loadAgentRuleStats() {
     const el = document.getElementById('agent-rule-summary');
     if (!el) return;
     try {
-      const r = await fetch('/api/knowledge/agent-rules/stats');
+      const r = await _kf('/api/knowledge/agent-rules/stats');
       const s = await r.json();
       el.innerHTML = `草案 <b>${s.draft || 0}</b> · 已发布 <b>${s.published || 0}</b> · 已归档 <b>${s.archived || 0}</b>`;
     } catch (e) { el.textContent = '加载规则统计失败'; }
@@ -552,11 +566,11 @@ const KnowledgeApp = {
     if (resultEl) resultEl.textContent = '⏳ 同步中...';
     if (btn) btn.disabled = true;
     try {
-      const r = await fetch('/api/knowledge/sync-agent-rules', { method: 'POST' });
+      const r = await _kf('/api/knowledge/sync-agent-rules', { method: 'POST' });
       const data = await r.json();
       if (!r.ok) {
         if (resultEl) resultEl.textContent = '✗ ' + (data.error || '同步失败');
-        alert(data.error || '同步失败');
+        showToast(data.error || '同步失败', 'error');
         return;
       }
       if (resultEl) {
@@ -657,8 +671,8 @@ const KnowledgeApp = {
     const sourceEl = document.querySelector('input[name="knowledge-source"]:checked');
     const knowledgeSource = sourceEl ? sourceEl.value : 'llm';
 
-    if (!dateFrom || !dateTo) { this._scanning = false; alert('请选择日期范围'); return; }
-    if (!chatIds.length) { this._scanning = false; alert('请至少选择一个群聊'); return; }
+    if (!dateFrom || !dateTo) { this._scanning = false; showToast('请选择日期范围', 'warning'); return; }
+    if (!chatIds.length) { this._scanning = false; showToast('请至少选择一个群聊', 'warning'); return; }
 
     this.closeScanModal();
     const progressDiv = document.getElementById('scan-progress');
@@ -671,7 +685,7 @@ const KnowledgeApp = {
     this._scanReader = null;
 
     try {
-      const resp = await fetch('/api/knowledge/run', {
+      const resp = await _kf('/api/knowledge/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -717,7 +731,7 @@ const KnowledgeApp = {
               const suffix = reused ? `，复用 ${reused} 个 AI 分析结果` : '';
               const warnings = ev.result?.warnings || [];
               const warningSuffix = warnings.length
-                ? `，${warnings.length} 个分块因 LLM 格式异常已跳过：${warnings[0]}`
+                ? `，${warnings.length} 个小段已自动重试后仍未提取`
                 : '';
               statusEl.textContent = `✅ 完成！${ev.result?.card_count || 0} 条知识卡片${suffix}${warningSuffix}`;
               barEl.style.width = '100%';
@@ -766,16 +780,15 @@ const KnowledgeApp = {
     const syncBtn = document.getElementById('btn-sync-obsidian');
     if (!info) return;
     try {
-      const r = await fetch('/api/knowledge/obsidian-config');
+      const r = await _kf('/api/knowledge/spaces');
       const data = await r.json();
-      const path = data.vault_path || '';
-      this._obsidianVaultPath = path;
-      if (path) {
-        info.textContent = '📁 ' + path;
+      this.knowledgeSpaces = data.spaces || [];
+      if (this.knowledgeSpaces.length) {
+        info.textContent = this.knowledgeSpaces.map(s => `${s.name} → ${s.vault_path}`).join('；');
         info.style.color = '#7ee787';
         if (syncBtn) syncBtn.disabled = false;
       } else {
-        info.textContent = '未配置 Obsidian vault 路径';
+        info.textContent = '未配置知识库空间';
         info.style.color = '#8b949e';
         if (syncBtn) syncBtn.disabled = false;
       }
@@ -785,32 +798,32 @@ const KnowledgeApp = {
   },
 
   async configureObsidianPath() {
-    const current = this._obsidianVaultPath || '';
-    const input = prompt('请输入 Obsidian vault 的本地绝对路径（例如 D:\\\\Obsidian\\\\MyVault）：', current);
-    if (input === null) return; // user cancelled
-    const path = String(input).trim();
+    const name = prompt('知识库名称（例如：审计、AI、副业）：');
+    if (name === null || !String(name).trim()) return;
+    const path = prompt('对应 Obsidian vault 的本地绝对路径（例如 E:\\\\Obsidian\\\\Audit）：');
+    if (path === null || !String(path).trim()) return;
     const resultEl = document.getElementById('obsidian-sync-result');
     try {
-      const r = await fetch('/api/knowledge/obsidian-config', {
-        method: 'PUT',
+      const r = await _kf('/api/knowledge/spaces', {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ vault_path: path }),
+        body: JSON.stringify({ name: String(name).trim(), vault_path: String(path).trim() }),
       });
       const data = await r.json();
       if (!r.ok) {
-        alert('保存失败: ' + (data.error || '未知错误'));
+        showToast('保存失败: ' + (data.error || '未知错误'), 'error');
         return;
       }
       await this.loadObsidianConfig();
-      if (resultEl) resultEl.textContent = path ? '✓ 路径已保存' : '✓ 已清除路径';
+      if (resultEl) resultEl.textContent = '✓ 知识库空间已保存；请通过接口为群分配归属。';
     } catch (e) {
-      alert('保存失败: ' + e.message);
+      showToast('保存失败: ' + e.message, 'error');
     }
   },
 
   async syncToObsidian() {
-    if (!this._obsidianVaultPath) {
-      alert('请先点击「⚙ 设置路径」配置 Obsidian vault 路径');
+    if (!this.knowledgeSpaces || !this.knowledgeSpaces.length) {
+      showToast('请先点击「⚙ 配置知识库」创建至少一个知识库空间', 'warning');
       return;
     }
     const resultEl = document.getElementById('obsidian-sync-result');
@@ -834,11 +847,11 @@ const KnowledgeApp = {
     if (minScore) params.set('min_score', minScore);
 
     try {
-      const r = await fetch('/api/knowledge/sync-obsidian?' + params.toString(), { method: 'POST' });
+      const r = await _kf('/api/knowledge/sync-obsidian?' + params.toString(), { method: 'POST' });
       const data = await r.json();
       if (!r.ok) {
         if (resultEl) resultEl.textContent = '✗ ' + (data.error || '同步失败');
-        alert(data.error || '同步失败');
+        showToast(data.error || '同步失败', 'error');
         return;
       }
       const errs = data.errors && data.errors.length ? `，${data.errors.length} 个错误` : '';
@@ -887,9 +900,9 @@ const KnowledgeApp = {
 
   async bulkAction(action) {
     const ids = Array.from(this.selectedIds);
-    if (!ids.length) { alert('请先点击“全选当前列表”或勾选要处理的卡片'); return; }
+    if (!ids.length) { showToast('请先点击“全选当前列表”或勾选要处理的卡片', 'warning'); return; }
     if (action === 'delete' && !confirm(`确定删除 ${ids.length} 条卡片？`)) return;
-    await fetch('/api/knowledge/cards/bulk', {
+    await _kf('/api/knowledge/cards/bulk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ card_ids: ids, action }),
@@ -934,7 +947,7 @@ const KnowledgeApp = {
       : '/api/knowledge/schedules';
     const method = this._editingScheduleId ? 'PUT' : 'POST';
 
-    await fetch(url, {
+    await _kf(url, {
       method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -944,7 +957,7 @@ const KnowledgeApp = {
   },
 
   async toggleSchedule(id, enabled) {
-    await fetch('/api/knowledge/schedules/' + id, {
+    await _kf('/api/knowledge/schedules/' + id, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }),
@@ -954,7 +967,7 @@ const KnowledgeApp = {
 
   async editSchedule(id) {
     try {
-      const r = await fetch('/api/knowledge/schedules');
+      const r = await _kf('/api/knowledge/schedules');
       const data = await r.json();
       const sched = (data.schedules || []).find(s => s.id === id);
       if (sched) this.openScheduleModal(sched);
@@ -963,7 +976,7 @@ const KnowledgeApp = {
 
   async deleteSchedule(id) {
     if (!confirm('确定删除此定时任务？')) return;
-    await fetch('/api/knowledge/schedules/' + id, { method: 'DELETE' });
+    await _kf('/api/knowledge/schedules/' + id, { method: 'DELETE' });
     this.loadSchedules();
   },
 
@@ -1042,11 +1055,7 @@ const KnowledgeApp = {
   // Utilities
   // -----------------------------------------------------------------------
 
-  esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s || '';
-    return d.innerHTML;
-  },
+  esc(s) { return escapeHtml(s); },
 
   _debounce(fn, ms) {
     let t;
@@ -1067,6 +1076,42 @@ document.addEventListener('click', (e) => {
 document.addEventListener('click', (e) => {
   if (!e.target.closest('.convert-dropdown')) {
     document.querySelectorAll('.convert-menu.show').forEach(m => m.classList.remove('show'));
+  }
+});
+
+// Keyboard navigation for knowledge cards
+document.addEventListener('keydown', (e) => {
+  var inInput = ['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName);
+  if (inInput) return;
+
+  var cards = document.querySelectorAll('.knowledge-card');
+  if (!cards.length) return;
+
+  var currentIdx = -1;
+  for (var i = 0; i < cards.length; i++) {
+    if (cards[i].contains(document.activeElement) || cards[i] === document.activeElement) {
+      currentIdx = i; break;
+    }
+  }
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    var next = currentIdx < cards.length - 1 ? currentIdx + 1 : 0;
+    cards[next].setAttribute('tabindex', '-1');
+    cards[next].focus();
+    cards[next].scrollIntoView({ block: 'nearest' });
+  }
+  if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    var prev = currentIdx > 0 ? currentIdx - 1 : cards.length - 1;
+    cards[prev].setAttribute('tabindex', '-1');
+    cards[prev].focus();
+    cards[prev].scrollIntoView({ block: 'nearest' });
+  }
+  if (e.key === 'Enter' && currentIdx >= 0) {
+    e.preventDefault();
+    var cardId = cards[currentIdx].dataset.cardId;
+    if (cardId) KnowledgeApp.showDetail(cardId);
   }
 });
 

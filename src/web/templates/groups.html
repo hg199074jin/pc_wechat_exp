@@ -50,7 +50,7 @@
 </style>
 {% endblock %}
 {% block content %}
-<div id="loading-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:9999">
+<div id="loading-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:9999" role="status" aria-label="正在加载群列表">
   <div style="text-align:center;color:#c9d1d9">
     <div style="font-size:24px;margin-bottom:12px">⏳</div>
     <div id="loading-text">正在加载群列表...</div>
@@ -81,14 +81,14 @@
         <span class="hint" id="current-tag-count"></span>
       </div>
       <div class="group-controls">
-        <input type="text" class="text-input search" id="group-search" placeholder="搜索群名称...">
+        <input type="text" class="text-input search" id="group-search" placeholder="搜索群名称..." aria-label="搜索群名称">
         <div class="group-sort-controls">
-          <select id="group-sort-key" class="text-input">
+          <select id="group-sort-key" class="text-input" aria-label="排序依据">
             <option value="name">按名称</option>
             <option value="last_time">按最近对话</option>
             <option value="active_3d">按近3天活跃度</option>
           </select>
-          <select id="group-sort-dir" class="text-input">
+          <select id="group-sort-dir" class="text-input" aria-label="排序方向">
             <option value="asc">正序</option>
             <option value="desc">倒序</option>
           </select>
@@ -97,7 +97,7 @@
     </div>
     <div class="group-load-controls">
       <span>加载范围</span>
-      <select id="group-load-days" class="text-input">
+      <select id="group-load-days" class="text-input" aria-label="加载范围天数">
         <option value="1">最近1天有会话</option>
         <option value="3" selected>最近3天有会话</option>
         <option value="7">最近7天有会话</option>
@@ -106,19 +106,19 @@
       </select>
       <span class="hint">减少无价值旧群，加快加载</span>
     </div>
-    <div id="group-items"></div>
+    <div id="group-items" aria-live="polite" aria-label="群列表"></div>
     <div style="margin-top:12px; padding-top:12px; border-top:1px solid #30363d; display:flex; gap:8px; align-items:center">
       <button class="btn-primary" id="move-selected-btn" disabled>📦 移动选中群到...</button>
-      <select id="move-target" class="text-input" style="width:200px"></select>
+      <select id="move-target" class="text-input" style="width:200px" aria-label="移动目标标签"></select>
       <button class="btn-secondary" id="blacklist-selected-btn" disabled>🚫 加入黑名单</button>
       <span class="hint" id="move-hint">先在上方勾选群，再选择目标标签</span>
     </div>
   </div>
 </div>
 <!-- Blacklist modal -->
-<div class="modal" id="blacklist-modal" hidden>
+<div class="modal" id="blacklist-modal" hidden role="dialog" aria-modal="true" aria-labelledby="blacklist-modal-title">
   <div class="modal-content" style="width:560px;max-width:90vw">
-    <h3 style="margin-top:0">黑名单管理</h3>
+    <h3 style="margin-top:0" id="blacklist-modal-title">黑名单管理</h3>
     <p class="hint">黑名单中的群不会参与群管理加载和群名称解码。移出后会重新回到可加载范围。</p>
     <div id="blacklist-items" class="blacklist-list"></div>
     <div class="modal-actions">
@@ -127,7 +127,7 @@
   </div>
 </div>
 <!-- Progress modal -->
-<div class="modal" id="progress-modal" hidden>
+<div class="modal" id="progress-modal" hidden role="dialog" aria-modal="true" aria-labelledby="progress-title" aria-label="进度">
   <div class="modal-content">
     <h3 id="progress-title" style="margin-top:0">AI 自动分类中...</h3>
     <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>

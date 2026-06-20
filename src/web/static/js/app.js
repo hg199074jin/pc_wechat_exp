@@ -203,8 +203,13 @@ async function openGroupInfo() {
   const panel = document.getElementById('group-info-panel');
   const backdrop = document.getElementById('group-info-backdrop');
   if (!panel || !backdrop) return;
+  const triggerEl = document.activeElement;
   panel.style.display = 'block';
   backdrop.style.display = 'block';
+  panel.setAttribute('aria-hidden', 'false');
+  panel.setAttribute('tabindex', '-1');
+  panel.focus();
+  panel._returnFocus = triggerEl;
   groupInfo.el.innerHTML = '<div class="loading"><div class="loading-icon">⏳</div>加载群信息...</div>';
   try {
     const data = await api.groupInfo(Store.data.activeChat.id);
@@ -223,6 +228,77 @@ function closeGroupInfo() {
   if (!panel || !backdrop) return;
   panel.style.display = 'none';
   backdrop.style.display = 'none';
+  panel.setAttribute('aria-hidden', 'true');
+  if (panel._returnFocus) {
+    panel._returnFocus.focus();
+    panel._returnFocus = null;
+  }
 }
+
+// Keyboard shortcuts
+document.addEventListener('keydown', (e) => {
+  const inInput = ['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName);
+
+  // Ctrl+K or / to focus search (when not in input)
+  if ((e.ctrlKey && e.key === 'k') || (e.key === '/' && !inInput)) {
+    e.preventDefault();
+    const search = document.getElementById('contact-search') || document.getElementById('knowledge-search') || document.querySelector('input[type="search"]');
+    if (search) search.focus();
+  }
+
+  // Left/Right arrows for pagination (when not in input)
+  if (!inInput) {
+    if (e.key === 'ArrowLeft' && pagination) pagination.prev && pagination.prev();
+    if (e.key === 'ArrowRight' && pagination) pagination.next && pagination.next();
+  }
+
+  // Page Up/Down for message pagination
+  if (!inInput) {
+    if (e.key === 'PageDown') {
+      e.preventDefault();
+      const pg = Store.data.pagination;
+      if (pg && pg.page < pg.total_pages) {
+        Store.data.pagination.page = pg.page + 1;
+        loadMessages();
+      }
+    }
+    if (e.key === 'PageUp') {
+      e.preventDefault();
+      const pg = Store.data.pagination;
+      if (pg && pg.page > 1) {
+        Store.data.pagination.page = pg.page - 1;
+        loadMessages();
+      }
+    }
+  }
+
+  // Arrow key navigation for contact list
+  var contactListEl = document.getElementById('contact-list');
+  if (contactListEl && (contactListEl.contains(document.activeElement) || document.activeElement === document.getElementById('contact-search'))) {
+    var items = contactListEl.querySelectorAll('.contact-item');
+    if (!items.length) return;
+    var currentIdx = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].classList.contains('active')) { currentIdx = i; break; }
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      var next = currentIdx < items.length - 1 ? currentIdx + 1 : 0;
+      items[next].focus();
+      items[next].scrollIntoView({ block: 'nearest' });
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      var prev = currentIdx > 0 ? currentIdx - 1 : items.length - 1;
+      items[prev].focus();
+      items[prev].scrollIntoView({ block: 'nearest' });
+    }
+    if (e.key === 'Enter' && document.activeElement.classList.contains('contact-item')) {
+      e.preventDefault();
+      var chatId = document.activeElement.dataset.id;
+      if (chatId) selectContact(chatId);
+    }
+  }
+});
 
 document.addEventListener('DOMContentLoaded', initApp);

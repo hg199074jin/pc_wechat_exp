@@ -87,3 +87,90 @@ const showChatUI = (show) => {
   document.getElementById('welcome').style.display = show ? 'none' : '';
   ['chat-header','filter-bar','message-list','pagination-bar'].forEach(id => document.getElementById(id).style.display = d);
 };
+
+// Toast notification system
+function showToast(message, type = 'info', duration = 3000) {
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.style.cssText = 'position:fixed;top:16px;right:16px;z-index:10000;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
+    document.body.appendChild(container);
+  }
+  const toast = document.createElement('div');
+  const colors = { info: '#58a6ff', success: '#3fb950', warning: '#d29922', error: '#f85149' };
+  const icons = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌' };
+  toast.style.cssText = `background:#161b22;color:#c9d1d9;border:1px solid ${colors[type]};border-left:4px solid ${colors[type]};padding:12px 16px;border-radius:6px;font-size:13px;max-width:360px;pointer-events:auto;opacity:0;transform:translateX(20px);transition:opacity 0.3s,transform 0.3s;box-shadow:0 4px 12px rgba(0,0,0,0.4);display:flex;align-items:center;gap:8px;`;
+  toast.innerHTML = `<span>${icons[type]}</span><span>${escapeHtml(message)}</span>`;
+  container.appendChild(toast);
+  requestAnimationFrame(() => { toast.style.opacity = '1'; toast.style.transform = 'translateX(0)'; });
+  setTimeout(() => {
+    toast.style.opacity = '0'; toast.style.transform = 'translateX(20px)';
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
+
+// Skeleton loading placeholder
+function showSkeleton(el, rows = 5) {
+  let html = '<style>@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}</style>';
+  for (let i = 0; i < rows; i++) {
+    const w = 40 + Math.random() * 50;
+    html += `<div style="height:16px;background:linear-gradient(90deg,#21262d 25%,#30363d 50%,#21262d 75%);background-size:200% 100%;border-radius:4px;margin-bottom:12px;width:${w}%;animation:shimmer 1.5s infinite;"></div>`;
+  }
+  el.innerHTML = html;
+}
+
+// Error recovery suggestions
+const _errorHints = {
+  'LLM': '请检查 AI 分析页面的 LLM 配置（API Key、Base URL、Model）',
+  'timeout': '请求超时，请检查网络连接或增加超时时间',
+  'connection': '连接失败，请检查服务是否正在运行',
+  '401': '认证失败，请检查 API Key 是否正确',
+  '403': '访问被拒绝，请检查权限设置',
+  '429': '请求过于频繁，请稍后再试',
+  '500': '服务器内部错误，请查看日志获取详情',
+  '密钥': '请先运行"提取密钥"功能获取数据库密钥',
+  '解密': '请确认微信已关闭后再试，或重新提取密钥',
+  '备份': '请确认微信数据目录路径正确，且微信已至少登录过一次',
+  '扫描': '请确认已配置 LLM 且选择的群聊有消息记录',
+};
+function errorWithHint(msg) {
+  const lower = (msg || '').toLowerCase();
+  for (const [key, hint] of Object.entries(_errorHints)) {
+    if (lower.includes(key.toLowerCase())) {
+      return msg + '\n💡 ' + hint;
+    }
+  }
+  return msg;
+}
+
+// Unified modal management
+function openModal(id) {
+  const modal = document.getElementById(id);
+  if (!modal) return;
+  modal.style.display = 'flex';
+  modal.setAttribute('aria-hidden', 'false');
+  const focusTarget = modal.querySelector('input,button,select,textarea,[tabindex]');
+  if (focusTarget) setTimeout(() => focusTarget.focus(), 50);
+  modal._prevFocus = document.activeElement;
+}
+function closeModal(id) {
+  const modal = document.getElementById(id);
+  if (!modal) return;
+  modal.style.display = 'none';
+  modal.setAttribute('aria-hidden', 'true');
+  if (modal._prevFocus) { modal._prevFocus.focus(); modal._prevFocus = null; }
+}
+// ESC to close topmost modal
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const modals = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
+    for (let i = modals.length - 1; i >= 0; i--) {
+      if (modals[i].style.display !== 'none') {
+        closeModal(modals[i].id);
+        e.preventDefault();
+        break;
+      }
+    }
+  }
+});

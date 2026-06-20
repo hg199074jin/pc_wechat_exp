@@ -71,7 +71,7 @@
 
     <div class="config-panel">
       <h3 style="margin:0 0 8px">📋 选择群聊</h3>
-      <input type="text" id="group-search" placeholder="搜索群名称..." class="text-input">
+      <input type="text" id="group-search" placeholder="搜索群名称..." class="text-input" aria-label="搜索群名称">
       <div class="group-picker-toolbar">
         <span class="hint" id="selected-group-count">已选 0 个群</span>
         <span class="group-picker-actions">
@@ -88,9 +88,9 @@
 
     <div class="config-panel">
       <h3 style="margin:0 0 8px">📅 日期范围</h3>
-      <input type="date" id="date-from" class="text-input">
+      <input type="date" id="date-from" class="text-input" aria-label="开始日期">
       <span class="hint" style="text-align:center;display:block">至</span>
-      <input type="date" id="date-to" class="text-input">
+      <input type="date" id="date-to" class="text-input" aria-label="结束日期">
       <div class="date-quick-actions" id="date-quick-actions">
         <button class="btn-tiny" type="button" data-days="1">最近1天</button>
         <button class="btn-tiny" type="button" data-days="3">最近3天</button>
@@ -99,7 +99,7 @@
     </div>
 
     <button class="btn-primary" id="run-btn" style="width:100%">▶ 开始分析</button>
-    <div id="run-progress" class="progress-area" hidden>
+    <div id="run-progress" class="progress-area" hidden role="status" aria-label="分析进度">
       <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
       <p class="hint" id="progress-text"></p>
     </div>
@@ -107,20 +107,20 @@
     <div class="config-panel">
       <h3 style="margin:0 0 8px">⏰ 定时任务</h3>
       <button class="btn-secondary" id="add-schedule" style="width:100%">+ 新建定时任务</button>
-      <div id="schedule-list" style="margin-top:8px"></div>
+      <div id="schedule-list" style="margin-top:8px" aria-live="polite"></div>
     </div>
   </aside>
 
   <main class="main-area">
     <h2 style="margin-top:0">📊 分析结果</h2>
-    <div id="results-list"><div class="empty-state">选择群聊和日期，点击"开始分析"查看结果</div></div>
+    <div id="results-list" aria-live="polite" aria-label="分析结果"><div class="empty-state">选择群聊和日期，点击"开始分析"查看结果</div></div>
   </main>
 </div>
 
 <!-- LLM settings modal -->
-<div class="modal" id="settings-modal" hidden>
+<div class="modal" id="settings-modal" hidden role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
   <div class="modal-content">
-    <h3 style="margin-top:0">LLM 配置</h3>
+    <h3 style="margin-top:0" id="settings-modal-title">LLM 配置</h3>
     <label>Base URL <input type="text" id="cfg-base-url" class="text-input" placeholder="https://api.openai.com/v1"></label>
     <label>API Key <input type="password" id="cfg-api-key" class="text-input" placeholder="sk-..."></label>
     <label>Model <input type="text" id="cfg-model" class="text-input" placeholder="gpt-4o"></label>
@@ -145,7 +145,7 @@
 </div>
 
 <!-- Schedule modal -->
-<div class="modal" id="schedule-modal" hidden>
+<div class="modal" id="schedule-modal" hidden role="dialog" aria-modal="true" aria-labelledby="schedule-modal-title">
   <div class="modal-content">
     <h3 style="margin-top:0" id="schedule-modal-title">新建定时任务</h3>
     <label>名称 <input type="text" id="sched-name" class="text-input" placeholder="每天早8点分析"></label>

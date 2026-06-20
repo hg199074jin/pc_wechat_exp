@@ -87,7 +87,7 @@
 <div class="knowledge-layout">
   <aside class="knowledge-sidebar">
     <h3>📡 知识沉淀</h3>
-    <ul class="nav-list" id="status-nav">
+    <ul class="nav-list" id="status-nav" role="listbox" aria-label="状态筛选">
       <li class="active" data-status="">全部 <span class="nav-count" id="count-all">0</span></li>
       <li data-status="inbox">待沉淀 <span class="nav-count" id="count-inbox">0</span></li>
       <li data-status="saved">已收藏 <span class="nav-count" id="count-saved">0</span></li>
@@ -96,7 +96,7 @@
     </ul>
     <div class="filter-group">
       <label>类型</label>
-      <select id="filter-type" class="text-input">
+      <select id="filter-type" class="text-input" aria-label="知识类型筛选">
         <option value="">全部类型</option>
         <option value="audit_case">审计案例</option>
         <option value="sop">SOP</option>
@@ -110,13 +110,13 @@
     </div>
     <div class="filter-group">
       <label>群标签</label>
-      <select id="filter-tag-path" class="text-input">
+      <select id="filter-tag-path" class="text-input" aria-label="群标签筛选">
         <option value="">全部群标签</option>
       </select>
     </div>
     <div class="filter-group">
       <label>最低分</label>
-      <input id="filter-min-score" class="text-input" type="number" min="0" max="100" value="70">
+      <input id="filter-min-score" class="text-input" type="number" min="0" max="100" value="70" aria-label="最低分">
     </div>
     <hr style="border-color:#30363d;margin:12px 0">
     <div style="display:flex;gap:6px;flex-wrap:wrap">
@@ -128,7 +128,7 @@
     <h4 style="margin:0 0 8px;font-size:13px;">同步到 Obsidian</h4>
     <div id="obsidian-vault-info" style="font-size:12px;color:#8b949e;margin-bottom:6px;word-break:break-all;">加载中...</div>
     <div style="display:flex;gap:6px;flex-wrap:wrap">
-      <button class="btn-tiny" id="btn-obsidian-path">⚙ 设置路径</button>
+      <button class="btn-tiny" id="btn-obsidian-path">⚙ 配置知识库</button>
       <button class="btn-tiny btn-primary" id="btn-sync-obsidian">🔗 同步到 Obsidian</button>
     </div>
     <div id="obsidian-sync-result" style="font-size:12px;color:#8b949e;margin-top:6px;"></div>
@@ -139,27 +139,27 @@
     <div id="agent-rule-sync-result" style="font-size:12px;color:#8b949e;margin-top:6px;"></div>
     <hr style="border-color:#30363d;margin:12px 0">
     <h4 style="margin:0 0 8px;font-size:13px;">定时任务</h4>
-    <div id="schedule-list"></div>
+    <div id="schedule-list" aria-live="polite"></div>
     <button class="btn-tiny" id="btn-add-schedule" style="margin-top:6px">+ 新建定时扫描</button>
   </aside>
   <main class="knowledge-main">
     <div class="knowledge-toolbar">
-      <input id="knowledge-search" class="text-input" placeholder="搜索标题、摘要、标签..." style="flex:1;max-width:400px">
+      <input id="knowledge-search" class="text-input" placeholder="搜索标题、摘要、标签..." style="flex:1;max-width:400px" aria-label="搜索知识卡片">
       <button class="btn-tiny" id="btn-refresh">刷新</button>
       <button class="btn-tiny" id="btn-bulk-select">全选当前列表</button>
       <button class="btn-tiny" id="btn-bulk-archive">批量归档</button>
       <button class="btn-tiny btn-danger" id="btn-bulk-delete">批量删除</button>
     </div>
-    <div id="scan-progress" style="display:none">
+    <div id="scan-progress" style="display:none" role="status" aria-label="扫描进度">
       <div style="font-size:13px;color:#8b949e" id="scan-status"></div>
       <div class="progress-bar-container"><div class="progress-bar-fill" id="scan-bar"></div></div>
     </div>
-    <div id="knowledge-list"></div>
+    <div id="knowledge-list" aria-live="polite" aria-label="知识卡片列表"></div>
   </main>
 </div>
 
 <!-- Scan Modal -->
-<div class="modal-overlay" id="scan-modal">
+<div class="modal-overlay" id="scan-modal" role="dialog" aria-modal="true" aria-label="知识雷达扫描">
   <div class="modal-box">
     <h3>📡 知识雷达扫描</h3>
     <div class="form-row">
@@ -191,11 +191,11 @@
     </div>
     <div class="form-row">
       <label>最低分</label>
-      <input type="number" id="scan-min-score" class="text-input" value="70" min="0" max="100">
+      <input type="number" id="scan-min-score" class="text-input" value="70" min="0" max="100" aria-label="最低分">
     </div>
     <div class="form-row">
       <label>最大卡片数</label>
-      <input type="number" id="scan-max-cards" class="text-input" value="30" min="1" max="200">
+      <input type="number" id="scan-max-cards" class="text-input" value="30" min="1" max="200" aria-label="最大卡片数">
     </div>
     <div class="modal-actions">
       <button class="btn-tiny" onclick="KnowledgeApp.closeScanModal()">取消</button>
@@ -205,7 +205,7 @@
 </div>
 
 <!-- Schedule Modal -->
-<div class="modal-overlay" id="schedule-modal">
+<div class="modal-overlay" id="schedule-modal" role="dialog" aria-modal="true" aria-label="定时扫描配置">
   <div class="modal-box">
     <h3>⏰ 定时扫描配置</h3>
     <div class="form-row">
@@ -232,7 +232,7 @@
     </div>
     <div class="form-row">
       <label>最低分</label>
-      <input type="number" id="sched-min-score" class="text-input" value="70" min="0" max="100">
+      <input type="number" id="sched-min-score" class="text-input" value="70" min="0" max="100" aria-label="最低分">
     </div>
     <div class="modal-actions">
       <button class="btn-tiny" onclick="KnowledgeApp.closeScheduleModal()">取消</button>
@@ -242,7 +242,7 @@
 </div>
 
 <!-- Detail Modal -->
-<div class="modal-overlay" id="detail-modal">
+<div class="modal-overlay" id="detail-modal" role="dialog" aria-modal="true" aria-label="知识详情">
   <div class="modal-box" style="width:700px">
     <div id="detail-content"></div>
     <div class="modal-actions">
@@ -252,5 +252,6 @@
 </div>
 {% endblock %}
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/utils.js') }}"></script>
 <script src="{{ url_for('static', filename='js/knowledge-app.js') }}"></script>
 {% endblock %}

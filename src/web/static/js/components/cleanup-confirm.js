@@ -87,10 +87,27 @@ class CleanupConfirm extends Component {
       var modal = document.getElementById('cleanup-modal');
       if (stage) {
         if (backdrop) backdrop.style.display = 'block';
-        if (modal) modal.style.display = 'flex';
+        if (modal) {
+          modal.style.display = 'flex';
+          modal.setAttribute('aria-hidden', 'false');
+          modal.setAttribute('tabindex', '-1');
+          modal._returnFocus = document.activeElement;
+          setTimeout(function() {
+            var firstBtn = modal.querySelector('button:not([disabled])');
+            if (firstBtn) firstBtn.focus();
+            else modal.focus();
+          }, 50);
+        }
       } else {
         if (backdrop) backdrop.style.display = 'none';
-        if (modal) modal.style.display = 'none';
+        if (modal) {
+          modal.style.display = 'none';
+          modal.setAttribute('aria-hidden', 'true');
+          if (modal._returnFocus) {
+            modal._returnFocus.focus();
+            modal._returnFocus = null;
+          }
+        }
       }
       if (stage === 'verify') {
         setTimeout(function() {
