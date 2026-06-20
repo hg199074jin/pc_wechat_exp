@@ -2,7 +2,7 @@
 import pytest
 import sqlite3
 import os
-import tempfile
+import gc
 from engine.services.name_resolver import resolve_wxid, pick_display_name
 
 
@@ -73,10 +73,12 @@ class TestResolveWxid:
     """Tests that require an in-memory contact.db."""
 
     @pytest.fixture
-    def contact_db_path(self):
-        tmp = tempfile.mkdtemp()
+    def contact_db_path(self, tmp_path):
+        # tmp_path is pytest-managed and cleaned up robustly on Windows.
+        # Use a subdirectory so the contact.db file lives under <root>/contact/.
+        tmp = str(tmp_path)
         db_path = os.path.join(tmp, 'contact', 'contact.db')
-        os.makedirs(os.path.dirname(db_path))
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE contact (id INTEGER, username TEXT, remark TEXT, nick_name TEXT, alias TEXT, small_head_url TEXT)")
         conn.execute("INSERT INTO contact VALUES (1, 'wxid_zhangsan', '张三', '小张', 'zs_alias', '')")
@@ -84,9 +86,11 @@ class TestResolveWxid:
         conn.execute("INSERT INTO contact VALUES (3, 'wxid_wangwu', 'wxid_wangwu', 'wxid_wangwu', 'wxid_wangwu', '')")
         conn.commit()
         conn.close()
+        # Force any lingering sqlite handles from prior lookups to release
+        # before yielding, so teardown on Windows does not hit WinError 32.
+        gc.collect()
         yield tmp
-        import shutil
-        shutil.rmtree(tmp)
+        gc.collect()
 
     @pytest.fixture(autouse=True)
     def clear_cache(self):

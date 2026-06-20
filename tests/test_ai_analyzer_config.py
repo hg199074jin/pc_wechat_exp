@@ -4,12 +4,37 @@ import os
 import json
 import tempfile
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from engine.services import ai_analyzer
 
 
-def test_save_and_load_llm_config():
+@pytest.fixture
+def isolated_llm_config(monkeypatch):
+    """Isolate LLM config from the real .wechat_exp_config.json.
+
+    load_llm_config/save_llm_config fall back to the global config file, which
+    on a dev machine holds real credentials. These tests must not read or write
+    that file, so we stub the engine.config_file accessors with in-memory dicts.
+    """
+    store = {}
+
+    def _fake_get():
+        return dict(store.get('llm', {}))
+
+    def _fake_set(cfg):
+        store['llm'] = dict(cfg or {})
+
+    # Patch the imports used inside ai_analyzer.load/save_llm_config.
+    import engine.config_file as cfg_mod
+    monkeypatch.setattr(cfg_mod, 'get_llm_config', _fake_get)
+    monkeypatch.setattr(cfg_mod, 'set_llm_config', _fake_set)
+    return store
+
+
+def test_save_and_load_llm_config(isolated_llm_config):
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, 'config.json')
         cfg = {'base_url': 'https://api.openai.com/v1', 'api_key': 'sk-xxx',
@@ -19,12 +44,12 @@ def test_save_and_load_llm_config():
         assert loaded == cfg
 
 
-def test_load_llm_config_missing_file():
+def test_load_llm_config_missing_file(isolated_llm_config):
     with tempfile.TemporaryDirectory() as tmp:
         assert ai_analyzer.load_llm_config(os.path.join(tmp, 'missing.json')) == {}
 
 
-def test_load_llm_config_mask_api_key():
+def test_load_llm_config_mask_api_key(isolated_llm_config):
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, 'config.json')
         ai_analyzer.save_llm_config(

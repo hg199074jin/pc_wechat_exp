@@ -6,8 +6,10 @@ WeChat EXP (wechat-exp) is a portable Windows tool for extracting, decrypting, a
 - SQLCipher 4 key extraction from Weixin.exe memory
 - Batch database decryption (AES-256-CBC)
 - Web-based chat viewer (Flask SPA) with avatars, group info, message search
-- Annual "Wrapped" report (8 cards, Spotify-Wrapped-style)
-- Word cloud, employee export, comprehensive HTML reports
+- AI group chat analysis with structured artifacts and evidence verification
+- Knowledge radar for extracting, scoring, and managing high-value knowledge cards
+- Obsidian sync for exporting knowledge cards as AI-readable Markdown vault
+- Style fingerprints for group-level long-term memory
 - Backup/export wizards with SSE progress
 
 **Tech Stack**: Python 3.8+, Flask 3.x, SQLite (SQLCipher 4), Vanilla JS (SPA), ECharts
@@ -15,11 +17,13 @@ WeChat EXP (wechat-exp) is a portable Windows tool for extracting, decrypting, a
 ## Key Paths
 
 - Source: `src/`
-- Engine services: `src/engine/services/` (chat.py, message.py, media.py)
+- Engine services: `src/engine/services/` (chat.py, message.py, media.py, knowledge_store.py, knowledge_extractor.py, knowledge_export.py, knowledge_scheduler.py, analysis_artifact.py, evidence_verifier.py, style_fingerprint.py, hardlink.py)
 - Web app: `src/web/app.py` → `src/web/routes/`
-- Wrapped cards: `src/web/reports/wrapped/`
+- Knowledge radar: `src/web/templates/knowledge.html`, `src/web/routes/knowledge_api.py`
+- Obsidian sync: `src/engine/services/obsidian_export.py`
 - Output: `output/` (decrypted DBs, exports, caches)
 - Docs: `docs/` (specs, plans, analysis)
+- AI rules: `docs/ai-rules/` (project rule foundation)
 
 ## Continuous Analysis Mode
 

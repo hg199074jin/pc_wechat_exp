@@ -36,7 +36,10 @@ def pick_display_name(wxid: str, remark, nick, alias, db_username) -> str:
         return nick_v
     if _ok(alias_v):
         return alias_v
-    return ''
+    # All name fields empty/garbled/echo-username → fall back to the username
+    # itself (db_username when present, otherwise the wxid). Returning '' here
+    # would leave callers with no display name at all.
+    return uname
 
 
 def extract_chatroom_name(ext_buffer: bytes) -> str | None:

@@ -199,17 +199,20 @@ def _find_all_chat_dbs(decrypted_dir: str, chat_id: str) -> list:
     result = []
 
     for idx, db_path in dbs:
+        conn = None
         try:
             conn = sqlite3.connect(db_path)
             row = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                 (tname,)
             ).fetchone()
-            conn.close()
             if row:
                 result.append((db_path, tname))
         except sqlite3.Error:
             continue
+        finally:
+            if conn:
+                conn.close()
 
     return result
 
@@ -509,17 +512,19 @@ def _row_to_message(row, chat_id: str, decrypted_dir: str = '', parse_xml: bool 
                 is_sender = True
             # else: wxid_from_map exists but != own_wxid and != '__self__' → from other person
         else:
-            # sender_map is empty, use per-message heuristics for 1-on-1:
-            # - Content with "wxid_xxx:\\n" or "gh_xxx:\\n" prefix → other party
-            #   (self-sent messages don't carry a sender prefix).
-            # - Plain text without prefix → self-sent.
-            # - Otherwise keep origin_source behavior.
-            if isinstance(content, str) and ':\n' in content[:80]:
-                prefix = content.split(':\n', 1)[0]
-                if prefix.startswith('wxid_') or prefix.startswith('gh_'):
-                    pass  # is_sender stays False (other party)
-            elif ltype == 1 and isinstance(content, str) and content.strip():
-                is_sender = True
+            # sender_map is empty. Only apply content-based heuristics when
+            # origin_source is itself missing/unreliable (not a definitive 0).
+            # When origin explicitly marks the message as received (0), trust it
+            # rather than guessing from content shape — otherwise a plain-text
+            # reply from the other person gets misclassified as self-sent.
+            origin_unknown = origin is None or (isinstance(origin, (int, float)) and origin not in (0, 1))
+            if origin_unknown:
+                if isinstance(content, str) and ':\n' in content[:80]:
+                    prefix = content.split(':\n', 1)[0]
+                    if prefix.startswith('wxid_') or prefix.startswith('gh_'):
+                        pass  # is_sender stays False (other party)
+                elif ltype == 1 and isinstance(content, str) and content.strip():
+                    is_sender = True
     elif is_group and not is_sender and real_sender_id and real_sender_id != 0 and sender_map:
         wxid_from_map = sender_map.get(int(real_sender_id))
         # sender_map now includes the self rsid (mapped to own_wxid or '__self__')
@@ -1028,15 +1033,17 @@ def query_message_detail(decrypted_dir: str, msg_id: int, chat_id: str = '') -> 
 def _resolve_chat_id_from_hash(db_path: str, h: str, dbs: list) -> str:
     """Try to resolve a Msg_ hash back to a username via Name2Id."""
     for idx, other_path in dbs:
+        conn = None
         try:
             conn = sqlite3.connect(other_path)
             for (uname,) in conn.execute("SELECT user_name FROM Name2Id"):
                 if uname and hashlib.md5(uname.encode()).hexdigest() == h:
-                    conn.close()
                     return uname
-            conn.close()
         except sqlite3.Error:
             pass
+        finally:
+            if conn:
+                conn.close()
     return None
 
 

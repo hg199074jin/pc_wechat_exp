@@ -1,4 +1,5 @@
 # AI Knowledge Loop Design
+> **Canonical version.** The earlier `docs/ai-knowledge-loop-design.md` has been removed; this file is the single source of truth for the AI knowledge loop design.
 
 **Date:** 2026-06-20
 **Status:** Approved for planning
