@@ -17,12 +17,19 @@ Usage:
 
 import ctypes
 import ctypes.wintypes as wt
+import logging
 import os
 import re
 import sqlite3
 import struct
 import sys
 
+from engine.services.hardlink import (
+    get_base_storage, resolve_from_hardlink_db, try_resolve_path,
+    FALLBACK_STORAGE_ROOTS,
+)
+
+logger = logging.getLogger(__name__)
 kernel32 = ctypes.windll.kernel32
 
 # ---------------------------------------------------------------------------
@@ -76,7 +83,8 @@ def _get_wechat_pids():
                     except ValueError:
                         pass
         return pids
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to get WeChat PIDs: %s", e)
         return []
 
 
@@ -149,27 +157,8 @@ def _try_key(key_bytes, ciphertext):
 
 
 # ---------------------------------------------------------------------------
-# HardLink path resolution (inline, same as media.py)
+# HardLink path resolution — delegates to shared hardlink module
 # ---------------------------------------------------------------------------
-
-def _get_base_storage(decrypted_dir):
-    """Get WeChat file storage root from hardlink.db db_info."""
-    hardlink_db = os.path.join(decrypted_dir, "hardlink", "hardlink.db")
-    if not os.path.isfile(hardlink_db):
-        return None
-    try:
-        conn = sqlite3.connect(hardlink_db)
-        row = conn.execute("SELECT ValueStdStr FROM db_info WHERE Key='uuid'").fetchone()
-        conn.close()
-        if row and row[0]:
-            parts = str(row[0]).split('_', 2)
-            if len(parts) >= 3:
-                storage_path = parts[-1]
-                if os.path.isdir(storage_path):
-                    return storage_path
-    except sqlite3.Error:
-        pass
-    return None
 
 
 def _resolve_hardlink_path(decrypted_dir, media_info, wxid):
@@ -184,26 +173,26 @@ def _resolve_hardlink_path(decrypted_dir, media_info, wxid):
     if not md5 or len(md5) != 32:
         return None
 
+    # Try standard hardlink DB resolution first
+    rel_path = resolve_from_hardlink_db(decrypted_dir, md5, 3)  # 3 = image
+    if rel_path:
+        result = try_resolve_path(decrypted_dir, rel_path, wxid)
+        if result:
+            return result
+
+    # Fallback: try file_name LIKE match (file md5 is the .dat file name prefix)
     hardlink_db = os.path.join(decrypted_dir, "hardlink", "hardlink.db")
     if not os.path.isfile(hardlink_db):
         return None
-
+    conn = None
     try:
         conn = sqlite3.connect(hardlink_db)
-        # First try direct md5 match (works when md5 is the CDN md5 from XML)
         row = conn.execute(
-            "SELECT file_name, dir1, dir2 FROM image_hardlink_info_v4 WHERE md5=?",
-            (md5,)
+            "SELECT file_name, dir1, dir2 FROM image_hardlink_info_v4 "
+            "WHERE file_name LIKE ? LIMIT 1",
+            (md5 + '%',)
         ).fetchone()
-        # If direct match fails, try file_name LIKE (file md5 is the .dat file name prefix)
         if not row:
-            row = conn.execute(
-                "SELECT file_name, dir1, dir2 FROM image_hardlink_info_v4 "
-                "WHERE file_name LIKE ? LIMIT 1",
-                (md5 + '%',)
-            ).fetchone()
-        if not row:
-            conn.close()
             return None
 
         file_name, dir1, dir2 = row
@@ -211,19 +200,15 @@ def _resolve_hardlink_path(decrypted_dir, media_info, wxid):
         dir2_name = d2[0] if d2 else None
         d1 = conn.execute("SELECT username FROM dir2id WHERE rowid=?", (dir1,)).fetchone()
         dir1_name = d1[0] if d1 else None
-        conn.close()
 
         if dir1_name and dir2_name:
             rel_path = f'msg/attach/{dir1_name}/{dir2_name}/Img/{file_name}'
-            rel_path = rel_path.replace('/', os.sep)
-            base = _get_base_storage(decrypted_dir) or 'D:\\xwechat_files'
-            for sr in [base, 'D:\\xwechat_files', 'C:\\xwechat_files']:
-                if os.path.isdir(sr) and wxid:
-                    candidate = os.path.join(sr, wxid, rel_path)
-                    if os.path.isfile(candidate):
-                        return candidate
+            return try_resolve_path(decrypted_dir, rel_path, wxid)
     except sqlite3.Error:
         pass
+    finally:
+        if conn:
+            conn.close()
     return None
 
 
@@ -376,6 +361,79 @@ def _scan_memory_for_aes_keys(h_process, ciphertext, print_fn=None):
     return None
 
 
+V2_MAGIC = b'\x07\x08\x56\x32\x08\x07'
+
+
+def _find_v2_header_addresses(h_process):
+    """Scan process memory for V2 magic header locations.
+
+    Returns a list of addresses where V2_MAGIC is found in committed,
+    readable memory regions.
+    """
+    mbi = MEMORY_BASIC_INFORMATION()
+    v2_addrs = []
+    address = 0
+    while address < 0x7FFFFFFFFFFF:
+        result = kernel32.VirtualQueryEx(
+            h_process, ctypes.c_void_p(address),
+            ctypes.byref(mbi), ctypes.sizeof(mbi)
+        )
+        if result == 0:
+            break
+        if (mbi.State == MEM_COMMIT and
+            mbi.Protect != PAGE_NOACCESS and
+            (mbi.Protect & PAGE_GUARD) == 0 and
+            0 < mbi.RegionSize <= 50 * 1024 * 1024):
+            region_base = ctypes.cast(mbi.BaseAddress, ctypes.c_void_p).value
+            if region_base is None:
+                next_addr = address + mbi.RegionSize
+                address = next_addr
+                continue
+            try:
+                buf = ctypes.create_string_buffer(mbi.RegionSize)
+            except (OverflowError, MemoryError):
+                next_addr = address + mbi.RegionSize
+                address = next_addr
+                continue
+            br = ctypes.c_size_t(0)
+            ok = kernel32.ReadProcessMemory(
+                h_process, ctypes.c_void_p(region_base),
+                buf, mbi.RegionSize, ctypes.byref(br)
+            )
+            if ok and br.value > 0:
+                data = buf.raw[:br.value]
+                idx = data.find(V2_MAGIC)
+                while idx != -1:
+                    v2_addrs.append(region_base + idx)
+                    idx = data.find(V2_MAGIC, idx + 1)
+        next_addr = address + mbi.RegionSize
+        if next_addr <= address:
+            break
+        address = next_addr
+    return v2_addrs
+
+
+def _read_window_around_address(h_process, addr, window_half=256):
+    """Read a memory window around an address.
+
+    Returns the raw bytes, or None if read fails.
+    """
+    buf_start = addr - window_half
+    buf_size = window_half * 2
+    try:
+        buf = ctypes.create_string_buffer(buf_size)
+    except (OverflowError, MemoryError):
+        return None
+    br = ctypes.c_size_t(0)
+    ok = kernel32.ReadProcessMemory(
+        h_process, ctypes.c_void_p(buf_start),
+        buf, buf_size, ctypes.byref(br)
+    )
+    if not ok or br.value < 16:
+        return None
+    return buf.raw[:br.value]
+
+
 def _scan_near_v2_headers(h_process, ciphertext, print_fn=None):
     """Scan memory near V2 header patterns for AES keys (raw binary or ASCII hex).
 
@@ -401,52 +459,10 @@ def _scan_near_v2_headers(h_process, ciphertext, print_fn=None):
     if print_fn is None:
         print_fn = lambda *args, **kwargs: None
 
-    V2_MAGIC = b'\x07\x08\x56\x32\x08\x07'
     WINDOW_HALF = 256
     t0 = time.time()
 
-    # Find all V2 magic occurrences in committed readable memory
-    mbi = MEMORY_BASIC_INFORMATION()
-    v2_addrs = []
-    address = 0
-    while address < 0x7FFFFFFFFFFF:
-        result = kernel32.VirtualQueryEx(
-            h_process, ctypes.c_void_p(address),
-            ctypes.byref(mbi), ctypes.sizeof(mbi)
-        )
-        if result == 0:
-            break
-        if (mbi.State == MEM_COMMIT and
-            mbi.Protect != PAGE_NOACCESS and
-            (mbi.Protect & PAGE_GUARD) == 0 and
-            0 < mbi.RegionSize <= 50 * 1024 * 1024):
-            region_base = ctypes.cast(mbi.BaseAddress, ctypes.c_void_p).value
-            if region_base is None:
-                next_addr = address + mbi.RegionSize
-                address = next_addr
-                continue
-            region_size = mbi.RegionSize
-            try:
-                buf = ctypes.create_string_buffer(region_size)
-            except (OverflowError, MemoryError):
-                next_addr = address + mbi.RegionSize
-                address = next_addr
-                continue
-            bytes_read = ctypes.c_size_t(0)
-            ok = kernel32.ReadProcessMemory(
-                h_process, ctypes.c_void_p(region_base),
-                buf, region_size, ctypes.byref(bytes_read)
-            )
-            if ok and bytes_read.value > 0:
-                data = buf.raw[:bytes_read.value]
-                idx = data.find(V2_MAGIC)
-                while idx != -1:
-                    v2_addrs.append(region_base + idx)
-                    idx = data.find(V2_MAGIC, idx + 1)
-        next_addr = address + mbi.RegionSize
-        if next_addr <= address:
-            break
-        address = next_addr
+    v2_addrs = _find_v2_header_addresses(h_process)
 
     elapsed = time.time() - t0
     print_fn(f"[v2_key:headers] Found {len(v2_addrs)} V2 header matches in {elapsed:.1f}s")
@@ -461,20 +477,9 @@ def _scan_near_v2_headers(h_process, ciphertext, print_fn=None):
     tested_hex = 0
 
     for addr in v2_addrs:
-        buf_start = addr - WINDOW_HALF
-        buf_size = WINDOW_HALF * 2
-        try:
-            buf = ctypes.create_string_buffer(buf_size)
-        except (OverflowError, MemoryError):
+        data = _read_window_around_address(h_process, addr, WINDOW_HALF)
+        if data is None:
             continue
-        bytes_read = ctypes.c_size_t(0)
-        ok = kernel32.ReadProcessMemory(
-            h_process, ctypes.c_void_p(buf_start),
-            buf, buf_size, ctypes.byref(bytes_read)
-        )
-        if not ok or bytes_read.value < 16:
-            continue
-        data = buf.raw[:bytes_read.value]
 
         # Pass 1: raw 16-byte sliding window, step=4
         for i in range(0, len(data) - 16, 4):
@@ -941,8 +946,8 @@ def _merge_into_cache(decrypted_dir, new_keys):
         if os.path.isfile(keys_file):
             with open(keys_file, 'r', encoding='utf-8') as f:
                 existing = json.load(f)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Key cache read failed (%s), starting fresh: %s", keys_file, e)
 
     md5_keys = existing.get('md5_keys', {})
     added = 0
@@ -959,8 +964,8 @@ def _merge_into_cache(decrypted_dir, new_keys):
         try:
             with open(keys_file, 'w', encoding='utf-8') as f:
                 json.dump(existing, f, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to write key cache %s: %s", keys_file, e)
 
     return added
 
@@ -1089,12 +1094,12 @@ def extract_keys_from_mmkv(decrypted_dir: str, wxid: str = None) -> dict:
             if not os.path.isfile(hardlink_db):
                 hardlink_db = os.path.join(decrypted_dir, "HardLink", "hardlink.db")
             if os.path.isfile(hardlink_db):
+                conn = None
                 try:
                     conn = sqlite3.connect(hardlink_db)
                     row = conn.execute(
                         "SELECT ValueStdStr FROM db_info WHERE Key='uuid'"
                     ).fetchone()
-                    conn.close()
                     if row and row[0]:
                         parts = str(row[0]).split('_', 2)
                         if len(parts) >= 3 and os.path.isdir(parts[-1]):
@@ -1105,34 +1110,37 @@ def extract_keys_from_mmkv(decrypted_dir: str, wxid: str = None) -> dict:
                                     break
                 except sqlite3.Error:
                     pass
+                finally:
+                    if conn:
+                        conn.close()
 
     # Clean wxid: strip suffix after second underscore (py_wx_key CleanWxid)
     wxid = _clean_wxid(wxid)
 
     if not wxid or not wxid.startswith('wxid_'):
-        print("[mmkv] Cannot determine wxid — skipping MMKV extraction", flush=True)
+        logger.warning("[mmkv] Cannot determine wxid — skipping MMKV extraction")
         return {}
 
     # 1. Find kvcomm directories and parse codes
     kvcomm_dirs = _scan_mmkv_kvcomm_dirs()
     if not kvcomm_dirs:
-        print("[mmkv] No kvcomm directories found", flush=True)
+        logger.info("[mmkv] No kvcomm directories found")
         return {}
 
     codes = _parse_mmkv_codes(kvcomm_dirs)
     if not codes:
-        print("[mmkv] No key statistic files found in kvcomm dirs", flush=True)
+        logger.info("[mmkv] No key statistic files found in kvcomm dirs")
         return {}
 
-    print(f"[mmkv] Found {len(codes)} MMKV code(s) in {len(kvcomm_dirs)} kvcomm dirs: {codes}",
-          flush=True)
+    logger.info("[mmkv] Found %d MMKV code(s) in %d kvcomm dirs: %s",
+                len(codes), len(kvcomm_dirs), codes)
 
     # 2. Derive candidate keys for each code
     candidates = []
     for code in codes:
         xor_key, aes_key = _derive_key_from_mmkv(code, wxid)
-        print(f"[mmkv] Code {code} -> xor=0x{xor_key:02X} aes={aes_key.hex()}",
-              flush=True)
+        logger.info("[mmkv] Code %d -> xor=0x%02X aes=%s",
+                    code, xor_key, aes_key.hex())
         candidates.append((xor_key, aes_key, code))
 
     if not candidates:
@@ -1141,11 +1149,11 @@ def extract_keys_from_mmkv(decrypted_dir: str, wxid: str = None) -> dict:
     # 3. Load V2 ciphertexts for verification
     tasks = _load_v2_ciphertexts(decrypted_dir, wxid)
     if not tasks:
-        print("[mmkv] No V2 .dat files found for verification", flush=True)
+        logger.info("[mmkv] No V2 .dat files found for verification")
         return {}
 
-    print(f"[mmkv] Testing {len(candidates)} candidate(s) against {len(tasks)} V2 file(s)...",
-          flush=True)
+    logger.info("[mmkv] Testing %d candidate(s) against %d V2 file(s)...",
+                len(candidates), len(tasks))
 
     # 4. Verify each candidate against a small sample, then cache globally.
     #    The key is per-account (not per-image), so we only need to verify
@@ -1166,7 +1174,7 @@ def extract_keys_from_mmkv(decrypted_dir: str, wxid: str = None) -> dict:
 
     pending = {md5: v for md5, v in tasks.items() if md5 not in existing_md5s}
     if not pending:
-        print("[mmkv] All V2 keys already cached", flush=True)
+        logger.info("[mmkv] All V2 keys already cached")
         return {}
 
     # Sample up to 5 files for verification; if the key works on these,
@@ -1181,30 +1189,29 @@ def extract_keys_from_mmkv(decrypted_dir: str, wxid: str = None) -> dict:
             if fmt:
                 match_count += 1
         if match_count == len(sample_md5s):
-            print(f"[mmkv] Code {code} verified ({match_count}/{len(sample_md5s)} sample files)",
-                  flush=True)
+            logger.info("[mmkv] Code %d verified (%d/%d sample files)",
+                        code, match_count, len(sample_md5s))
             verified_codes.add(code)
             # Cache for ALL pending files (not just the sample)
             for md5 in pending:
                 found_all[md5] = aes_key
             break  # One working code is enough
         elif match_count > 0:
-            print(f"[mmkv] Code {code} partial match ({match_count}/{len(sample_md5s)})",
-                  flush=True)
+            logger.warning("[mmkv] Code %d partial match (%d/%d)",
+                           code, match_count, len(sample_md5s))
             verified_codes.add(code)
             for md5 in pending:
                 found_all[md5] = aes_key
             break
         else:
-            print(f"[mmkv] Code {code} no match on sample files", flush=True)
+            logger.debug("[mmkv] Code %d no match on sample files", code)
 
     if found_all:
-        print(f"[mmkv] Success! Account key derived locally — cached for {len(found_all)} files",
-              flush=True)
+        logger.info("[mmkv] Success! Account key derived locally — cached for %d files",
+                    len(found_all))
         _merge_into_cache(decrypted_dir, found_all)
     else:
-        print("[mmkv] No keys matched — account may use different wxid or codes",
-              flush=True)
+        logger.warning("[mmkv] No keys matched — account may use different wxid or codes")
 
     return found_all
 
@@ -1319,12 +1326,12 @@ def harvest_v2_keys(decrypted_dir, wxid=None, interval=2.0,
             if not os.path.isfile(hardlink_db):
                 hardlink_db = os.path.join(decrypted_dir, "HardLink", "hardlink.db")
             if os.path.isfile(hardlink_db):
+                conn = None
                 try:
                     conn = sqlite3.connect(hardlink_db)
                     row = conn.execute(
                         "SELECT ValueStdStr FROM db_info WHERE Key='uuid'"
                     ).fetchone()
-                    conn.close()
                     if row and row[0]:
                         parts = str(row[0]).split('_', 2)
                         if len(parts) >= 3:
@@ -1338,6 +1345,9 @@ def harvest_v2_keys(decrypted_dir, wxid=None, interval=2.0,
                                         break
                 except sqlite3.Error:
                     pass
+                finally:
+                    if conn:
+                        conn.close()
 
     if not wxid:
         print_fn("[v2_harvest] ERROR: Cannot determine wxid")
@@ -1422,66 +1432,15 @@ def harvest_v2_keys(decrypted_dir, wxid=None, interval=2.0,
                     # Strategy 1: V2 header proximity scan
                     # Find all V2 headers, read ±256 bytes around each,
                     # test 16-byte sliding windows against ALL ciphertexts
-                    V2_MAGIC = b'\x07\x08\x56\x32\x08\x07'
                     WINDOW_HALF = 256
-                    mbi = MEMORY_BASIC_INFORMATION()
-                    v2_addrs = []
-                    address = 0
-                    while address < 0x7FFFFFFFFFFF:
-                        result = kernel32.VirtualQueryEx(
-                            h_process, ctypes.c_void_p(address),
-                            ctypes.byref(mbi), ctypes.sizeof(mbi)
-                        )
-                        if result == 0:
-                            break
-                        if (mbi.State == MEM_COMMIT and
-                            mbi.Protect != PAGE_NOACCESS and
-                            (mbi.Protect & PAGE_GUARD) == 0 and
-                            0 < mbi.RegionSize <= 50 * 1024 * 1024):
-                            region_base = ctypes.cast(mbi.BaseAddress, ctypes.c_void_p).value
-                            if region_base is None:
-                                next_addr = address + mbi.RegionSize
-                                address = next_addr
-                                continue
-                            try:
-                                buf = ctypes.create_string_buffer(mbi.RegionSize)
-                            except (OverflowError, MemoryError):
-                                next_addr = address + mbi.RegionSize
-                                address = next_addr
-                                continue
-                            br = ctypes.c_size_t(0)
-                            ok = kernel32.ReadProcessMemory(
-                                h_process, ctypes.c_void_p(region_base),
-                                buf, mbi.RegionSize, ctypes.byref(br)
-                            )
-                            if ok and br.value > 0:
-                                data = buf.raw[:br.value]
-                                idx = data.find(V2_MAGIC)
-                                while idx != -1:
-                                    v2_addrs.append(region_base + idx)
-                                    idx = data.find(V2_MAGIC, idx + 1)
-                        next_addr = address + mbi.RegionSize
-                        if next_addr <= address:
-                            break
-                        address = next_addr
+                    v2_addrs = _find_v2_header_addresses(h_process)
 
                     if v2_addrs:
                         tested = 0
                         for addr in v2_addrs:
-                            buf_start = addr - WINDOW_HALF
-                            buf_size = WINDOW_HALF * 2
-                            try:
-                                buf = ctypes.create_string_buffer(buf_size)
-                            except (OverflowError, MemoryError):
+                            data = _read_window_around_address(h_process, addr, WINDOW_HALF)
+                            if data is None:
                                 continue
-                            br = ctypes.c_size_t(0)
-                            ok = kernel32.ReadProcessMemory(
-                                h_process, ctypes.c_void_p(buf_start),
-                                buf, buf_size, ctypes.byref(br)
-                            )
-                            if not ok or br.value < 16:
-                                continue
-                            data = buf.raw[:br.value]
 
                             # 16-byte windows, step=4
                             for i in range(0, len(data) - 16, 4):
@@ -1532,6 +1491,7 @@ def harvest_v2_keys(decrypted_dir, wxid=None, interval=2.0,
 
                     # Strategy 2: Scan RW memory for 32-char hex strings
                     if pending:
+                        mbi = MEMORY_BASIC_INFORMATION()
                         rw_regions = []
                         address = 0
                         while address < 0x7FFFFFFFFFFF:

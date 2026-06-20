@@ -277,3 +277,12 @@ def get_msg_table(conn, username):
     return tname if row else None
 
 
+def safe_id(value: str) -> str:
+    """Filesystem-safe id sanitization.
+
+    Preserves alphanumerics (including CJK), underscores and @.
+    Everything else becomes '_'. Suitable for chat_id → filename conversion.
+    """
+    return ''.join(c if c.isalnum() or c in '_@' else '_' for c in (value or ''))
+
+

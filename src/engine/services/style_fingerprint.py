@@ -10,9 +10,7 @@ import os
 import time
 from typing import Dict
 
-
-def _safe_id(chat_id: str) -> str:
-    return ''.join(c if c.isalnum() or c in '_@' else '_' for c in (chat_id or ''))
+from engine.utils import safe_id as _safe_id
 
 
 def _style_dir(decrypted_dir: str) -> str:

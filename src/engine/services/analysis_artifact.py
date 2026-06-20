@@ -6,9 +6,7 @@ import os
 import re
 from typing import Dict, Optional
 
-
-def _safe_id(chat_id: str) -> str:
-    return ''.join(c if c.isalnum() or c in '_@' else '_' for c in (chat_id or ''))
+from engine.utils import safe_id as _safe_id
 
 
 def _safe_date(date: str) -> str:
@@ -40,9 +38,9 @@ def extract_json_object(raw: str) -> str:
             _, end = json.JSONDecoder().raw_decode(text)
             return text[:end]
         except json.JSONDecodeError:
-            end = text.rfind('}')
-            if end > 0:
-                return text[:end + 1]
+            # rfind fallback removed — it truncates at wrong } inside strings.
+            # Let the caller handle the malformed JSON via repair loop.
+            pass
     return text
 
 

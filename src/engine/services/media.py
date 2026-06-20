@@ -1,10 +1,18 @@
 """Media file resolution and serving."""
+import logging
 import os
 import re
 import sqlite3
 import mimetypes
 import struct
 from flask import abort, send_file
+
+from engine.services.hardlink import (
+    get_base_storage, resolve_from_hardlink_db, try_resolve_path,
+    FALLBACK_STORAGE_ROOTS, get_all_storage_roots,
+)
+
+logger = logging.getLogger(__name__)
 
 STORAGE_CANDIDATES = [
     'MsgAttach', 'FileStorage', 'Image', 'Video',
@@ -20,8 +28,9 @@ _DAT_XOR_KEYS = [0xC9, 0x37, 0x96, 0x6A, 0xFF]
 _DAT_V1_HEADER = b'\x07\x08\x56\x31\x08\x07'
 _DAT_V2_HEADER = b'\x07\x08\x56\x32\x08\x07'
 _DAT_V2_DEFAULT_XOR = 0xC9  # empirically confirmed: 17325+ files use this
-# V1 fixed AES key: MD5 of '0'
-_DAT_V1_AES_KEY = bytes.fromhex('cfcd208495d565ef')
+# V1 fixed AES key: full MD5 of '0' (= cfcd208495d565ef66e7dff9f98764da, 16 bytes)
+# Note: the key must be 16 bytes for AES-128-ECB; do not truncate.
+_DAT_V1_AES_KEY = bytes.fromhex('cfcd208495d565ef66e7dff9f98764da')
 
 # Cache of image AES keys collected from type 3 XML messages
 _image_aes_keys = {}
@@ -64,8 +73,7 @@ def _detect_wxid(decrypted_dir: str) -> str:
                 conn.close()
 
     # Strategy 2: Scan known storage locations
-    for storage_root in [r'D:\xwechat_files', r'C:\xwechat_files',
-                         r'D:\WeChat Files', r'C:\WeChat Files']:
+    for storage_root in FALLBACK_STORAGE_ROOTS:
         try:
             if os.path.isdir(storage_root):
                 for d in os.listdir(storage_root):
@@ -81,31 +89,7 @@ def _detect_wxid(decrypted_dir: str) -> str:
 
 def _get_base_storage(decrypted_dir: str) -> str:
     """Get the original WeChat file storage root from hardlink.db's db_info table."""
-    hardlink_db = os.path.join(decrypted_dir, "hardlink", "hardlink.db")
-    if not os.path.isfile(hardlink_db):
-        hardlink_db = os.path.join(decrypted_dir, "HardLink", "hardlink.db")
-    if not os.path.isfile(hardlink_db):
-        return None
-    conn = None
-    try:
-        conn = sqlite3.connect(hardlink_db)
-        row = conn.execute(
-            "SELECT ValueStdStr FROM db_info WHERE Key='uuid'"
-        ).fetchone()
-        conn.close()
-        conn = None
-        if row and row[0]:
-            parts = str(row[0]).split('_', 2)
-            if len(parts) >= 3:
-                storage_path = parts[-1]
-                if os.path.isdir(storage_path):
-                    return storage_path
-    except sqlite3.Error:
-        pass
-    finally:
-        if conn:
-            conn.close()
-    return None
+    return get_base_storage(decrypted_dir)
 
 
 def _resolve_hardlink_path(decrypted_dir: str, media_info: dict, wxid: str = None) -> str:
@@ -128,37 +112,7 @@ def _resolve_hardlink_path(decrypted_dir: str, media_info: dict, wxid: str = Non
 
     # Helper: try all combinations of base + wxid + path
     def _try_paths(rel_path):
-        if not rel_path:
-            return None
-        rel_path = rel_path.replace('/', os.sep)
-        storage_roots = []
-        base = _get_base_storage(decrypted_dir)
-        if base:
-            storage_roots.append(base)
-        for sr in ['D:\\xwechat_files', 'C:\\xwechat_files',
-                   'D:\\WeChat Files', 'C:\\WeChat Files']:
-            if os.path.isdir(sr) and sr not in storage_roots:
-                storage_roots.append(sr)
-        for root in storage_roots:
-            for wd in [wxid, '']:
-                if not wd:
-                    continue
-                candidate = os.path.join(root, wd, rel_path)
-                try:
-                    real = os.path.realpath(candidate)
-                except (OSError, ValueError):
-                    continue
-                if not os.path.isfile(real):
-                    continue
-                # Containment check — prevent path traversal (e.g. ?path=..\..\Windows\...)
-                expected_parent = os.path.realpath(os.path.join(root, wd))
-                try:
-                    if os.path.commonpath([real, expected_parent]) != expected_parent:
-                        continue
-                except ValueError:
-                    continue
-                return real
-        return None
+        return try_resolve_path(decrypted_dir, rel_path, wxid)
 
     if local_path:
         result = _try_paths(local_path)
@@ -168,7 +122,7 @@ def _resolve_hardlink_path(decrypted_dir: str, media_info: dict, wxid: str = Non
     # Fallback: look up md5 in HardLink DB and construct path
     if md5 and len(md5) == 32:
         result = _resolve_from_hardlink_db(decrypted_dir, md5, media_type)
-        print(f"  [RESOLVE] bare md5={md5[:16]}... hldb_result={result}")
+        logger.debug("[RESOLVE] bare md5=%s... hldb_result=%s", md5[:16], result)
         if result:
             abs_path = _try_paths(result)
             if abs_path:
@@ -249,11 +203,7 @@ def _resolve_hardlink_path(decrypted_dir: str, media_info: dict, wxid: str = Non
         # HardLink DB entry (e.g. WeChat indexed only the thumbnail).
         if _fallback_dir:
             wxid_val = wxid or os.path.basename(os.path.dirname(decrypted_dir))
-            roots = [_get_base_storage(decrypted_dir)] if _get_base_storage(decrypted_dir) else []
-            for sr in ['D:\\xwechat_files', 'C:\\xwechat_files',
-                       'D:\\WeChat Files', 'C:\\WeChat Files']:
-                if os.path.isdir(sr) and sr not in roots:
-                    roots.append(sr)
+            roots = get_all_storage_roots(decrypted_dir)
             for root in roots:
                 abs_dir = os.path.join(root, wxid_val, _fallback_dir)
                 if os.path.isdir(abs_dir):
@@ -263,7 +213,7 @@ def _resolve_hardlink_path(decrypted_dir: str, media_info: dict, wxid: str = Non
                                 fname.endswith('_t.dat') or fname.endswith('_h.dat')):
                                 candidate = os.path.join(abs_dir, fname)
                                 if os.path.isfile(candidate):
-                                    print(f"  [RESOLVE] dir scan found: {fname}")
+                                    logger.debug("[RESOLVE] dir scan found: %s", fname)
                                     return candidate
                     except OSError:
                         pass
@@ -328,56 +278,7 @@ def _try_backup_media_by_md5(decrypted_dir: str, media_type: int, md5: str) -> s
 
 def _resolve_from_hardlink_db(decrypted_dir: str, md5: str, media_type: int) -> str:
     """Look up a file in the HardLink DB by md5 and return its relative path."""
-    hardlink_db = os.path.join(decrypted_dir, "hardlink", "hardlink.db")
-    if not os.path.isfile(hardlink_db):
-        hardlink_db = os.path.join(decrypted_dir, "HardLink", "hardlink.db")
-    if not os.path.isfile(hardlink_db):
-        return None
-
-    table_map = {3: 'image', 43: 'video', 6: 'file', 34: 'voice'}
-    table_suffix = table_map.get(media_type, 'image')
-    table_name = f'{table_suffix}_hardlink_info_v4'
-
-    conn = None
-    try:
-        conn = sqlite3.connect(hardlink_db)
-        # Prefer original (.dat) over thumbnails (_h.dat, _t.dat) when the
-        # same CDN md5 maps to multiple rows in the HardLink DB.
-        rows = conn.execute(
-            f"SELECT file_name, dir1, dir2 FROM [{table_name}] WHERE md5=? "
-            f"ORDER BY CASE WHEN substr(file_name, -6)='_h.dat' THEN 2 "
-            f"WHEN substr(file_name, -6)='_t.dat' THEN 3 ELSE 1 END",
-            (md5,)
-        ).fetchall()
-        if not rows:
-            return None
-
-        file_name, dir1, dir2 = rows[0]
-        dir1_name = None
-        dir2_name = None
-        if dir2:
-            d2 = conn.execute("SELECT * FROM dir2id WHERE rowid=?", (dir2,)).fetchone()
-            dir2_name = d2[0] if d2 else None
-        if dir1:
-            d1 = conn.execute("SELECT * FROM dir2id WHERE rowid=?", (dir1,)).fetchone()
-            dir1_name = d1[0] if d1 else None
-
-        if media_type == 3:  # Image
-            if dir1_name and dir2_name:
-                return f'msg/attach/{dir1_name}/{dir2_name}/Img/{file_name}'
-        elif media_type == 43:  # Video
-            if dir1_name:
-                return f'msg/video/{dir1_name}/{file_name}'
-        elif media_type == 6:  # File
-            if dir1_name:
-                return f'msg/file/{dir1_name}/{file_name}'
-
-        return None
-    except sqlite3.Error:
-        return None
-    finally:
-        if conn:
-            conn.close()
+    return resolve_from_hardlink_db(decrypted_dir, md5, media_type)
 
 
 def resolve_media_path(db_dir: str, file_path: str) -> str:
@@ -436,10 +337,6 @@ def serve_media(db_dir: str, file_path: str):
     mime, _ = mimetypes.guess_type(resolved)
     return send_file(resolved, mimetype=mime or 'application/octet-stream',
                      max_age=86400)
-
-
-# Common WeChat .dat file XOR keys
-_DAT_XOR_KEYS = [0xC9, 0x37, 0x96, 0x6A, 0xFF]
 
 
 def _detect_dat_xor_key(file_path: str) -> tuple:
@@ -656,8 +553,8 @@ def _load_or_build_image_key_map(decrypted_dir: str) -> dict:
                             result[thumb] = result[md5]
                             _h_added += 1
                 if _h_added:
-                    print(f"[media] Added {_h_added} _h thumbnail variants to cached keys", flush=True)
-                print(f"[media] Loaded {len(result)} verified keys from cache", flush=True)
+                    logger.info("[media] Added %d _h thumbnail variants to cached keys", _h_added)
+                logger.info("[media] Loaded %d verified keys from cache", len(result))
 
     except Exception:
         pass
@@ -742,14 +639,14 @@ def _extract_media_keys_from_dbs(decrypted_dir: str) -> tuple:
 
     msg_dir = os.path.join(decrypted_dir, 'message')
     if not os.path.isdir(msg_dir):
-        print("[media] message dir not found:", msg_dir, flush=True)
+        logger.warning("[media] message dir not found: %s", msg_dir)
         return None, None
 
     try:
         import zstandard as zstd
         dctx = zstd.ZstdDecompressor()
     except ImportError:
-        print("[media] zstandard not installed — cannot decompress message_content", flush=True)
+        logger.warning("[media] zstandard not installed — cannot decompress message_content")
         return None, None
 
     _ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'
@@ -762,6 +659,7 @@ def _extract_media_keys_from_dbs(decrypted_dir: str) -> tuple:
         if not fname.startswith('message_') or not fname.endswith('.db'):
             continue
         db_path = os.path.join(msg_dir, fname)
+        conn = None
         try:
             conn = sqlite3.connect(db_path)
             tables = conn.execute(
@@ -819,16 +717,17 @@ def _extract_media_keys_from_dbs(decrypted_dir: str) -> tuple:
                             except ValueError:
                                 pass
 
-                        print(f"[media] Found aeskey in {fname}/{tname} type={search_type}, "
-                              f"xor=0x{xor_key:02X}", flush=True)
-                        conn.close()
+                        logger.info("[media] Found aeskey in %s/%s type=%d, xor=0x%02X",
+                                    fname, tname, search_type, xor_key)
                         return xor_key, aes_key
-            conn.close()
         except sqlite3.Error:
             continue
+        finally:
+            if conn:
+                conn.close()
 
-    print(f"[media] Key scan complete: scanned {total_scanned} messages "
-          f"({total_zstd} zstd) across {msg_dir}, no aeskey found", flush=True)
+    logger.info("[media] Key scan complete: scanned %d messages (%d zstd) across %s, no aeskey found",
+                total_scanned, total_zstd, msg_dir)
     return None, None
 
 
@@ -851,6 +750,7 @@ def _translate_file_md5_to_cdn_md5(decrypted_dir: str, file_md5: str) -> str:
         hardlink_db = os.path.join(decrypted_dir, "HardLink", "hardlink.db")
     if not os.path.isfile(hardlink_db):
         return None
+    conn = None
     try:
         conn = sqlite3.connect(hardlink_db)
         # file_name is stored as {md5}.dat, {md5}_t.dat, {md5}_h.dat, etc.
@@ -858,11 +758,13 @@ def _translate_file_md5_to_cdn_md5(decrypted_dir: str, file_md5: str) -> str:
             "SELECT md5 FROM image_hardlink_info_v4 WHERE file_name LIKE ? LIMIT 1",
             (file_md5 + '%',)
         ).fetchone()
-        conn.close()
         if row and row[0]:
             return row[0]
     except sqlite3.Error:
         pass
+    finally:
+        if conn:
+            conn.close()
     return None
 
 
@@ -924,6 +826,7 @@ def _collect_image_aeskey(decrypted_dir: str, md5: str) -> str:
         if not fname.startswith('message_') or not fname.endswith('.db'):
             continue
         db_path = os.path.join(msg_dir, fname)
+        conn = None
         try:
             conn = sqlite3.connect(db_path)
             tables = conn.execute(
@@ -976,12 +879,13 @@ def _collect_image_aeskey(decrypted_dir: str, md5: str) -> str:
                                     # Also cache _h variant for non-thumb md5s
                                     if not sm5.endswith('_h'):
                                         _image_aes_keys[sm5 + '_h'] = key
-                                    print(f"[media] Found per-image aeskey for md5={sm5[:16]}... in {fname}", flush=True)
-                                    conn.close()
+                                    logger.info("[media] Found per-image aeskey for md5=%s... in %s", sm5[:16], fname)
                                     return key
-            conn.close()
         except sqlite3.Error:
             pass
+        finally:
+            if conn:
+                conn.close()
 
     return None
 
@@ -1245,6 +1149,7 @@ def _find_cached_thumbnail(decrypted_dir: str, md5: str, local_id: int = 0, wxid
     if not os.path.isfile(hardlink_db):
         return None
 
+    conn = None
     try:
         conn = sqlite3.connect(hardlink_db)
         # Try file_name LIKE first (file md5), then md5 column (CDN md5)
@@ -1258,26 +1163,27 @@ def _find_cached_thumbnail(decrypted_dir: str, md5: str, local_id: int = 0, wxid
                 (md5,)
             ).fetchone()
         if not row:
-            conn.close()
             return None
 
         dir1_id = row[0]
         dir1_row = conn.execute(
             "SELECT username FROM dir2id WHERE rowid=?", (dir1_id,)
         ).fetchone()
-        conn.close()
         if not dir1_row or not dir1_row[0]:
             return None
         dir1_name = dir1_row[0]
     except sqlite3.Error:
         return None
+    finally:
+        if conn:
+            conn.close()
 
     # Find WeChat storage root and wxid
     storage_root = _get_base_storage(decrypted_dir)
     wxid = wxid or _detect_wxid(decrypted_dir)
     if not storage_root or not wxid:
         # Try well-known locations
-        for sr in [r'D:\xwechat_files', r'C:\xwechat_files']:
+        for sr in FALLBACK_STORAGE_ROOTS:
             if os.path.isdir(sr):
                 storage_root = sr
                 break
@@ -1318,7 +1224,7 @@ def serve_hardlink_media(decrypted_dir: str, media_info: dict, wxid: str = None)
         abort(404)
 
     resolved = _resolve_hardlink_path(decrypted_dir, media_info, wxid)
-    print(f"  [LIGHTBOX] md5={media_info.get('md5','')[:16]}... resolved={resolved}")
+    logger.debug("[LIGHTBOX] md5=%s... resolved=%s", media_info.get('md5', '')[:16], resolved)
     if resolved is None or not os.path.isfile(resolved):
         abort(404)
 
@@ -1394,7 +1300,7 @@ def serve_hardlink_media(decrypted_dir: str, media_info: dict, wxid: str = None)
                                 if rv:
                                     return rv
                 except Exception as e:
-                    print(f"  [V2] MMKV key extraction failed: {e}")
+                    logger.warning("[V2] MMKV key extraction failed: %s", e)
 
                 # 2b) Account-key fallback: V2 keys are per-account, not per-image.
                 # If we have ANY cached key but this specific MD5 isn't in the map,
@@ -1441,7 +1347,7 @@ def serve_hardlink_media(decrypted_dir: str, media_info: dict, wxid: str = None)
                 diag_parts.append('no-thumb')
             elif not os.path.isfile(thumb):
                 diag_parts.append('thumb-miss')
-            print(f"  [V2 IMG FAIL] {' | '.join(diag_parts)}")
+            logger.warning("[V2 IMG FAIL] %s", ' | '.join(diag_parts))
 
             # Provide actionable error message
             from engine.services.v2_key_extract import is_wechat_running as _wx_running
@@ -1559,7 +1465,7 @@ def serve_voice(decrypted_dir: str, voice_path: str,
         wav_path = _silk_to_wav(silk_file, wav_file)
         if wav_path and os.path.isfile(wav_path):
             return send_file(wav_path, mimetype='audio/wav')
-        print(f"  [WARN] SILK→WAV conversion failed for: {silk_file}")
+        logger.warning("SILK→WAV conversion failed for: %s", silk_file)
         return send_file(silk_file, mimetype='application/octet-stream',
                          as_attachment=True, download_name=os.path.basename(silk_file))
 
@@ -1590,15 +1496,18 @@ def _extract_voice_from_db(decrypted_dir: str, create_time: int,
     for media_db in candidates:
         if not os.path.isfile(media_db):
             continue
+        conn = None
         try:
             conn = _sqlite3.connect(media_db)
             row = conn.execute(
                 "SELECT voice_data FROM VoiceInfo WHERE create_time=? AND local_id=?",
                 (create_time, local_id)
             ).fetchone()
-            conn.close()
         except _sqlite3.Error:
             continue
+        finally:
+            if conn:
+                conn.close()
 
         if not row or not row[0]:
             continue
@@ -1676,7 +1585,7 @@ def _silk_to_wav(silk_path: str, wav_path: str) -> str:
         if os.path.isfile(candidate):
             decoder = candidate
     if not decoder:
-        print(f"  [WARN] silk_decoder.exe not found (project_root={project_root}, bundle_dir={bundle_dir})")
+        logger.warning("silk_decoder.exe not found (project_root=%s, bundle_dir=%s)", project_root, bundle_dir)
         return None
     try:
         pcm_path = wav_path + '.pcm'
@@ -1686,7 +1595,7 @@ def _silk_to_wav(silk_path: str, wav_path: str) -> str:
         )
         if result.returncode != 0:
             stderr = result.stderr.decode('utf-8', errors='replace').strip()
-            print(f"  [WARN] silk_decoder.exe failed (exit={result.returncode}): {stderr}")
+            logger.warning("silk_decoder.exe failed (exit=%d): %s", result.returncode, stderr)
             if os.path.isfile(pcm_path):
                 try:
                     os.remove(pcm_path)
@@ -1694,21 +1603,21 @@ def _silk_to_wav(silk_path: str, wav_path: str) -> str:
                     pass
             return None
         if not os.path.isfile(pcm_path):
-            print(f"  [WARN] silk_decoder.exe produced no output file: {pcm_path}")
+            logger.warning("silk_decoder.exe produced no output file: %s", pcm_path)
             return None
         with open(pcm_path, 'rb') as f:
             pcm_data = f.read()
         os.remove(pcm_path)
         if not pcm_data:
-            print(f"  [WARN] silk_decoder.exe produced empty PCM: {pcm_path}")
+            logger.warning("silk_decoder.exe produced empty PCM: %s", pcm_path)
             return None
         _write_wav(wav_path, pcm_data)
         return wav_path
     except subprocess.TimeoutExpired:
-        print(f"  [WARN] silk_decoder.exe timeout after 30s: {silk_path}")
+        logger.warning("silk_decoder.exe timeout after 30s: %s", silk_path)
         return None
     except (subprocess.SubprocessError, OSError) as e:
-        print(f"  [WARN] silk_decoder.exe error: {e}")
+        logger.warning("silk_decoder.exe error: %s", e)
         return None
 
 
