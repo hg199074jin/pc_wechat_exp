@@ -1,8 +1,11 @@
 """Server-Sent Events progress streaming helper."""
 import json
+import logging
 import queue
 import threading
 from flask import Response, stream_with_context
+
+logger = logging.getLogger(__name__)
 
 
 def create_sse_progress() -> tuple:
@@ -84,10 +87,15 @@ def create_sse_progress() -> tuple:
         q.put(None)
 
     def error(message: str):
-        """Signal an error."""
+        """Signal an error. Logs full message server-side, sends sanitized version to client."""
+        logger.error("SSE error: %s", message)
+        # Strip potential filesystem paths from client-facing message
+        import re
+        sanitized = re.sub(r'[A-Za-z]:\\[^\s,;]+', '<path>', message)
+        sanitized = re.sub(r'/[a-z][a-z0-9_/]+\.[a-z]+', '<path>', sanitized)
         if cancel_flag.is_set():
             return
-        q.put({"stage": "error", "message": message, "progress": 0.0})
+        q.put({"stage": "error", "message": sanitized, "progress": 0.0})
         q.put(None)
 
     def select(matches: list):

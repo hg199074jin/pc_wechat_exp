@@ -190,7 +190,11 @@ def run_analysis():
         finally:
             _run_lock.release()
 
-    threading.Thread(target=_run, daemon=True).start()
+    try:
+        threading.Thread(target=_run, daemon=True).start()
+    except Exception:
+        _run_lock.release()
+        raise
     return sse_response(gen)
 
 

@@ -1,10 +1,21 @@
 """Flask application factory for the chat viewer."""
+import logging
 import os
 import sys
 import threading
 import webbrowser
 from flask import Flask, render_template, jsonify
 from engine.version import VERSION as __version__
+
+logger = logging.getLogger(__name__)
+
+# Configure logging on first import if not already configured
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+        datefmt='%H:%M:%S',
+    )
 
 
 def _resolve_path(relative_path: str) -> str:
@@ -26,6 +37,71 @@ def create_app(decrypted_dir: str, wxid: str = None, db_dir: str = None) -> Flas
     app.config['DB_DIR'] = db_dir
     app.config['APP_VERSION'] = __version__
     app.json.ensure_ascii = False
+
+    # CSRF protection: require X-Requested-With on state-changing requests
+    # to prevent drive-by attacks from malicious websites targeting localhost.
+    @app.before_request
+    def _check_csrf():
+        from flask import request, jsonify
+        from urllib.parse import urlparse
+        if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+            # Allow same-origin requests with X-Requested-With header
+            if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return None
+            # Validate Origin/Referer by parsing netloc (not substring match)
+            host = request.host
+            origin = request.headers.get('Origin', '')
+            referer = request.headers.get('Referer', '')
+            if origin:
+                if urlparse(origin).netloc != host:
+                    return jsonify({'error': 'CSRF validation failed'}), 403
+            elif referer:
+                if urlparse(referer).netloc != host:
+                    return jsonify({'error': 'CSRF validation failed'}), 403
+        return None
+
+    # Rate limiting: max 30 state-changing requests per minute per IP
+    _rate_limit_store = {}  # {ip: [timestamps]}
+    _RATE_LIMIT = 30
+    _RATE_WINDOW = 60  # seconds
+
+    @app.before_request
+    def _rate_limit():
+        from flask import request, jsonify
+        import time
+        if request.method not in ('POST', 'PUT', 'DELETE', 'PATCH'):
+            return None
+        ip = request.remote_addr or '127.0.0.1'
+        now = time.time()
+        # Clean old entries
+        if ip in _rate_limit_store:
+            _rate_limit_store[ip] = [t for t in _rate_limit_store[ip] if now - t < _RATE_WINDOW]
+        else:
+            _rate_limit_store[ip] = []
+        if len(_rate_limit_store[ip]) >= _RATE_LIMIT:
+            return jsonify({'error': '请求过于频繁，请稍后再试'}), 429
+        _rate_limit_store[ip].append(now)
+        return None
+
+    # Security headers
+    @app.after_request
+    def _security_headers(response):
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['X-XSS-Protection'] = '1; mode=block'
+        response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+        # CSP: allow inline styles (needed for dynamic HTML), CDN for marked.js
+        response.headers['Content-Security-Policy'] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: http: https:; "
+            "connect-src 'self'; "
+            "font-src 'self'; "
+            "object-src 'none'; "
+            "frame-ancestors 'none'"
+        )
+        return response
 
     # Inject version into all template contexts
     @app.context_processor
@@ -120,6 +196,10 @@ def create_app(decrypted_dir: str, wxid: str = None, db_dir: str = None) -> Flas
     def decrypt_page():
         return render_template('decrypt.html')
 
+    @app.route('/settings')
+    def settings_page():
+        return render_template('settings.html')
+
     # Export pages
     @app.route('/export')
     def export_page():
@@ -171,9 +251,12 @@ def create_app(decrypted_dir: str, wxid: str = None, db_dir: str = None) -> Flas
         from flask import send_from_directory, abort as _abort
         if _WXEMOJI_DIR is None or not os.path.isdir(_WXEMOJI_DIR):
             _abort(404)
-        if '..' in filename or filename.startswith('/'):
+        # Normalize to basename to prevent path traversal; send_from_directory
+        # is already safe but this avoids rejecting filenames like 'good..bad.png'.
+        safe_name = os.path.basename(filename.replace('\\', '/'))
+        if not safe_name:
             _abort(404)
-        return send_from_directory(str(_WXEMOJI_DIR), filename)
+        return send_from_directory(str(_WXEMOJI_DIR), safe_name)
 
     return app
 
@@ -188,7 +271,7 @@ def run_server(decrypted_dir: str, wxid: str = None, db_dir: str = None,
         from engine.services.ai_analyzer import config_path_for
         ai_scheduler.start_scheduler(config_path_for(decrypted_dir), decrypted_dir)
     except Exception as e:
-        print(f"[WARN] 启动 AI 分析调度器失败: {e}")
+        logger.warning("启动 AI 分析调度器失败: %s", e)
 
     # Start Knowledge Radar scheduler
     try:
@@ -196,7 +279,7 @@ def run_server(decrypted_dir: str, wxid: str = None, db_dir: str = None,
         from engine.services.ai_analyzer import config_path_for
         knowledge_scheduler.start_scheduler(config_path_for(decrypted_dir), decrypted_dir)
     except Exception as e:
-        print(f"[WARN] 启动知识雷达调度器失败: {e}")
+        logger.warning("启动知识雷达调度器失败: %s", e)
 
     url = open_url or f'http://{host}:{port}'
     timer = threading.Timer(1.0, lambda: webbrowser.open(url))

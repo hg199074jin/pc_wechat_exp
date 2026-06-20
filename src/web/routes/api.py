@@ -113,8 +113,7 @@ def _resolve_group_names(decrypted_dir: str, progress_cb=None) -> list:
 def _recent_group_activity(decrypted_dir: str, chat_ids: list, days: int = 3) -> dict:
     """Count messages per group in the recent N days.
 
-    This is intentionally opt-in because scanning 1000+ Msg_<hash> tables can
-    be noticeably slower than reading the chats index.
+    Batches queries by DB file to minimize connection overhead.
     """
     try:
         from engine.services.message import _find_all_chat_dbs
@@ -122,24 +121,36 @@ def _recent_group_activity(decrypted_dir: str, chat_ids: list, days: int = 3) ->
         return {}
 
     cutoff = int(time.time()) - max(1, int(days or 3)) * 86400
-    counts = {}
+    counts = {cid: 0 for cid in (chat_ids or [])}
+
+    # Group queries by db_path to reuse connections
+    db_queries = {}  # {db_path: [(chat_id, table_name), ...]}
     for chat_id in chat_ids or []:
-        total = 0
         try:
             for db_path, table_name in _find_all_chat_dbs(decrypted_dir, chat_id):
+                db_queries.setdefault(db_path, []).append((chat_id, table_name))
+        except Exception:
+            continue
+
+    for db_path, queries in db_queries.items():
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            for chat_id, table_name in queries:
                 try:
-                    conn = sqlite3.connect(db_path)
                     row = conn.execute(
-                        f"SELECT COUNT(*) FROM {table_name} WHERE create_time >= ?",
+                        f"SELECT COUNT(*) FROM [{table_name}] WHERE create_time >= ?",
                         (cutoff,),
                     ).fetchone()
-                    conn.close()
-                    total += int(row[0] or 0) if row else 0
+                    counts[chat_id] = counts.get(chat_id, 0) + (int(row[0] or 0) if row else 0)
                 except sqlite3.Error:
                     continue
-        except Exception:
-            total = 0
-        counts[chat_id] = total
+        except sqlite3.Error:
+            pass
+        finally:
+            if conn:
+                conn.close()
+
     return counts
 
 
@@ -347,17 +358,35 @@ def emoji():
     Query params: account (wxid), md5, emoji_url (optional remote CDN URL).
     """
     from flask import redirect, abort
+    from urllib.parse import urlparse
 
     md5_val = request.args.get('md5', '').strip().lower()
     emoji_url = request.args.get('emoji_url', '').strip()
     account = request.args.get('account', '').strip()
+
+    # Validate emoji_url is from known WeChat CDN domains
+    _ALLOWED_EMOJI_DOMAINS = {
+        'wx.qlogo.cn', 'wx.gtimg.cn', 'emoji.qpic.cn',
+        'res.wx.qq.com', 'mmbiz.qpic.cn', 'mmbiz.qlogo.cn',
+    }
+    def _is_safe_emoji_url(url):
+        if not url:
+            return False
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme not in ('http', 'https'):
+                return False
+            host = parsed.netloc.split(':')[0]
+            return any(host == d or host.endswith('.' + d) for d in _ALLOWED_EMOJI_DOMAINS)
+        except Exception:
+            return False
 
     if not md5_val or len(md5_val) != 32:
         abort(404)
 
     decrypted_dir, _, _ = _cfg()
     if not os.path.isdir(decrypted_dir):
-        if emoji_url:
+        if _is_safe_emoji_url(emoji_url):
             return redirect(emoji_url)
         abort(404)
 
@@ -401,8 +430,8 @@ def emoji():
                 mime, _ = __import__('mimetypes').guess_type(resolved)
                 return send_file(resolved, mimetype=mime or 'image/png')
 
-    # 2. Fallback: proxy from remote CDN URL
-    if emoji_url:
+    # 2. Fallback: proxy from remote CDN URL (only allowed domains)
+    if _is_safe_emoji_url(emoji_url):
         return redirect(emoji_url)
 
     abort(404)
@@ -800,3 +829,134 @@ def address_book_export():
         mimetype='text/csv',
         headers={'Content-Disposition': 'attachment; filename=address_book.csv'}
     )
+
+
+@api_bp.route('/system/status')
+def system_status():
+    """Return system status for the dashboard."""
+    import glob as _glob
+    from engine.version import VERSION
+    from engine.config_file import get_backup_data_dir
+
+    decrypted_dir = current_app.config.get('DECRYPTED_DIR', '')
+    wxid = current_app.config.get('WXID', '')
+
+    # Check if decrypted data exists
+    has_data = False
+    db_count = 0
+    total_size = 0
+    msg_dir = os.path.join(decrypted_dir, 'message') if decrypted_dir else ''
+    if msg_dir and os.path.isdir(msg_dir):
+        for f in os.listdir(msg_dir):
+            if f.startswith('message_') and f.endswith('.db'):
+                db_count += 1
+                total_size += os.path.getsize(os.path.join(msg_dir, f))
+        has_data = db_count > 0
+
+    # Check other data dirs
+    contact_db = os.path.join(decrypted_dir, 'contact', 'contact.db') if decrypted_dir else ''
+    has_contacts = os.path.isfile(contact_db)
+    media_dir = os.path.join(decrypted_dir, 'media') if decrypted_dir else ''
+    has_media = os.path.isdir(media_dir)
+
+    # Knowledge DB stats
+    knowledge_count = 0
+    try:
+        from engine.services.knowledge_store import list_cards, knowledge_db_path
+        kdb = knowledge_db_path(decrypted_dir) if decrypted_dir else ''
+        if kdb and os.path.isfile(kdb):
+            result = list_cards(kdb, page=1, per_page=1)
+            knowledge_count = result.get('total', 0)
+    except Exception:
+        pass
+
+    # Last backup info
+    backup_dir = get_backup_data_dir()
+
+    return jsonify({
+        'version': VERSION,
+        'wxid': wxid,
+        'has_data': has_data,
+        'db_count': db_count,
+        'db_size_mb': round(total_size / 1024 / 1024, 1),
+        'has_contacts': has_contacts,
+        'has_media': has_media,
+        'knowledge_count': knowledge_count,
+        'backup_dir': backup_dir or '',
+        'decrypted_dir': decrypted_dir or '',
+    })
+
+
+@api_bp.route('/search')
+def global_search():
+    """Global search across contacts, messages, and knowledge cards."""
+    q = request.args.get('q', '').strip()
+    if not q or len(q) < 2:
+        return jsonify({'contacts': [], 'messages': [], 'knowledge': []})
+
+    decrypted_dir = current_app.config.get('DECRYPTED_DIR', '')
+    results = {'contacts': [], 'messages': [], 'knowledge': []}
+
+    # Search contacts
+    try:
+        contacts = get_contacts(decrypted_dir)
+        q_lower = q.lower()
+        for c in contacts:
+            name = (c.get('display_name') or c.get('name') or '').lower()
+            remark = (c.get('remark') or '').lower()
+            if q_lower in name or q_lower in remark:
+                results['contacts'].append({
+                    'name': c.get('display_name') or c.get('name', ''),
+                    'chat_id': c.get('chat_id', ''),
+                })
+                if len(results['contacts']) >= 5:
+                    break
+    except Exception:
+        pass
+
+    # Search knowledge cards
+    try:
+        from engine.services.knowledge_store import list_cards, knowledge_db_path
+        kdb = knowledge_db_path(decrypted_dir) if decrypted_dir else ''
+        if kdb and os.path.isfile(kdb):
+            cards = list_cards(kdb, q=q, page=1, per_page=5)
+            for card in cards.get('cards', []):
+                results['knowledge'].append({
+                    'title': card.get('title', ''),
+                    'score': card.get('score', 0),
+                })
+    except Exception:
+        pass
+
+    return jsonify(results)
+
+
+@api_bp.route('/config/export')
+def export_config():
+    """Export config (without sensitive data) as JSON download."""
+    from engine.config_file import export_config as _export
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w')
+    tmp.close()
+    if _export(tmp.name):
+        from flask import send_file
+        return send_file(tmp.name, as_attachment=True,
+                        download_name='wechat_exp_config.json',
+                        mimetype='application/json')
+    return jsonify({'error': '导出失败'}), 500
+
+
+@api_bp.route('/config/import', methods=['POST'])
+def import_config():
+    """Import config from uploaded JSON file."""
+    from engine.config_file import import_config as _import
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'error': '请上传配置文件'}), 400
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='wb')
+    tmp.write(file.read())
+    tmp.close()
+    if _import(tmp.name):
+        return jsonify({'ok': True, 'message': '配置已导入'})
+    return jsonify({'error': '导入失败，请检查文件格式'}), 400

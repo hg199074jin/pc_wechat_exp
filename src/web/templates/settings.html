@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% block title %}WeChat EXP — 设置{% endblock %}
+{% block nav_right %}
+<a href="/" style="color:#8b949e;text-decoration:none;font-size:13px;">← 仪表盘</a>
+{% endblock %}
+{% block content %}
+<div style="max-width:720px;">
+  <h2 style="margin-bottom:4px;">⚙️ 设置</h2>
+  <p style="color:#8b949e;font-size:13px;margin-bottom:24px;">管理 LLM 配置、存储路径和应用设置</p>
+
+  <!-- LLM Configuration -->
+  <div class="settings-section">
+    <h3 style="color:#c9d1d9;font-size:15px;margin-bottom:12px;">🤖 AI 分析 (LLM) 配置</h3>
+    <div id="llm-status" style="font-size:12px;color:#8b949e;margin-bottom:12px;">加载中...</div>
+    <div style="display:grid;gap:12px;">
+      <label style="display:block;">
+        <span style="color:#8b949e;font-size:12px;">Base URL</span>
+        <input id="llm-base-url" type="text" placeholder="https://api.openai.com/v1" style="width:100%;margin-top:4px;">
+      </label>
+      <label style="display:block;">
+        <span style="color:#8b949e;font-size:12px;">API Key</span>
+        <input id="llm-api-key" type="password" placeholder="sk-..." style="width:100%;margin-top:4px;">
+      </label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <label style="display:block;">
+          <span style="color:#8b949e;font-size:12px;">模型</span>
+          <input id="llm-model" type="text" placeholder="gpt-4o" style="width:100%;margin-top:4px;">
+        </label>
+        <label style="display:block;">
+          <span style="color:#8b949e;font-size:12px;">Temperature</span>
+          <input id="llm-temperature" type="number" min="0" max="2" step="0.1" placeholder="0.5" style="width:100%;margin-top:4px;">
+        </label>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <label style="display:block;">
+          <span style="color:#8b949e;font-size:12px;">Max Tokens</span>
+          <input id="llm-max-tokens" type="number" min="100" max="32000" placeholder="2048" style="width:100%;margin-top:4px;">
+        </label>
+        <label style="display:block;">
+          <span style="color:#8b949e;font-size:12px;">超时 (秒)</span>
+          <input id="llm-timeout" type="number" min="5" max="300" placeholder="30" style="width:100%;margin-top:4px;">
+        </label>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:4px;">
+        <button id="btn-save-llm" class="btn-primary" style="padding:8px 16px;">保存 LLM 配置</button>
+        <button id="btn-test-llm" style="padding:8px 16px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;cursor:pointer;">测试连接</button>
+      </div>
+      <div id="llm-test-result" style="font-size:12px;display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Obsidian Configuration -->
+  <div class="settings-section" style="margin-top:32px;">
+    <h3 style="color:#c9d1d9;font-size:15px;margin-bottom:12px;">📝 Obsidian 同步</h3>
+    <div style="display:grid;gap:12px;">
+      <label style="display:block;">
+        <span style="color:#8b949e;font-size:12px;">Obsidian Vault 路径</span>
+        <input id="obsidian-path" type="text" placeholder="D:\Obsidian\MyVault" style="width:100%;margin-top:4px;">
+      </label>
+      <button id="btn-save-obsidian" class="btn-primary" style="padding:8px 16px;width:fit-content;">保存路径</button>
+    </div>
+  </div>
+
+  <!-- Backup Configuration -->
+  <div class="settings-section" style="margin-top:32px;">
+    <h3 style="color:#c9d1d9;font-size:15px;margin-bottom:12px;">💾 备份设置</h3>
+    <div id="backup-info" style="font-size:12px;color:#8b949e;margin-bottom:12px;">加载中...</div>
+    <div style="display:grid;gap:12px;">
+      <label style="display:block;">
+        <span style="color:#8b949e;font-size:12px;">默认备份根目录</span>
+        <input id="backup-root" type="text" placeholder="D:\WeChat_Backup" style="width:100%;margin-top:4px;">
+      </label>
+      <button id="btn-save-backup" class="btn-primary" style="padding:8px 16px;width:fit-content;">保存路径</button>
+    </div>
+  </div>
+
+  <!-- Config Import/Export -->
+  <div class="settings-section" style="margin-top:32px;">
+    <h3 style="color:#c9d1d9;font-size:15px;margin-bottom:12px;">📁 配置导入/导出</h3>
+    <p style="font-size:12px;color:#8b949e;margin-bottom:12px;">导出配置不含 API Key 和数据库密钥，可安全分享</p>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;">
+      <a href="/api/config/export" download class="btn-primary" style="padding:8px 16px;text-decoration:none;display:inline-block;">📥 导出配置</a>
+      <label style="padding:8px 16px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;cursor:pointer;font-size:13px;">📤 导入配置<input type="file" accept=".json" style="display:none;" onchange="importConfig(this.files[0])"></label>
+    </div>
+    <div id="import-result" style="font-size:12px;margin-top:8px;display:none;"></div>
+  </div>
+
+  <!-- System Info -->
+  <div class="settings-section" style="margin-top:32px;">
+    <h3 style="color:#c9d1d9;font-size:15px;margin-bottom:12px;">ℹ️ 系统信息</h3>
+    <div id="sys-info" style="font-size:13px;color:#8b949e;line-height:1.8;">加载中...</div>
+  </div>
+</div>
+
+<script>
+async function importConfig(file) {
+  if (!file) return;
+  const el = document.getElementById('import-result');
+  el.style.display = 'block'; el.style.color = '#8b949e'; el.textContent = '导入中...';
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const r = await fetch('/api/config/import', {method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}, body:form});
+    const d = await r.json();
+    el.style.color = d.ok ? '#3fb950' : '#f85149';
+    el.textContent = d.ok ? '✅ ' + d.message : '❌ ' + d.error;
+    if (d.ok) loadSettings();
+  } catch(e) { el.style.color = '#f85149'; el.textContent = '❌ ' + e.message; }
+}
+</script>
+
+<style>
+.settings-section{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px;}
+.settings-section input{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:13px;}
+.settings-section input:focus{border-color:#58a6ff;outline:none;}
+.btn-primary{background:#238636;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;}
+.btn-primary:hover{background:#2ea043;}
+</style>
+
+<script>
+async function loadSettings() {
+  // Load LLM config
+  try {
+    const r = await fetch('/api/analysis/config');
+    const d = await r.json();
+    if (d.base_url) document.getElementById('llm-base-url').value = d.base_url;
+    if (d.api_key && d.api_key !== '••••••••') document.getElementById('llm-api-key').value = d.api_key;
+    if (d.model) document.getElementById('llm-model').value = d.model;
+    if (d.temperature !== undefined) document.getElementById('llm-temperature').value = d.temperature;
+    if (d.max_tokens) document.getElementById('llm-max-tokens').value = d.max_tokens;
+    if (d.timeout) document.getElementById('llm-timeout').value = d.timeout;
+    document.getElementById('llm-status').textContent = d.api_key ? '✅ 已配置' : '⚠️ 未配置';
+    document.getElementById('llm-status').style.color = d.api_key ? '#3fb950' : '#d29922';
+  } catch(e) { document.getElementById('llm-status').textContent = '❌ 加载失败'; }
+
+  // Load system status
+  try {
+    const r = await fetch('/api/system/status');
+    const d = await r.json();
+    let info = `版本: v${d.version}<br>`;
+    info += `wxid: ${d.wxid || '未检测'}<br>`;
+    info += `数据状态: ${d.has_data ? '✅ 已解密 (' + d.db_count + ' 个数据库, ' + d.db_size_mb + ' MB)' : '⚠️ 未解密'}<br>`;
+    info += `通讯录: ${d.has_contacts ? '✅ 已加载' : '❌ 未找到'}<br>`;
+    info += `知识卡片: ${d.knowledge_count} 条<br>`;
+    info += `解密目录: ${d.decrypted_dir || '未设置'}`;
+    document.getElementById('sys-info').innerHTML = info;
+    document.getElementById('backup-info').innerHTML = d.backup_dir ?
+      '✅ 最后备份目录: ' + d.backup_dir : '⚠️ 未找到备份记录';
+  } catch(e) { document.getElementById('sys-info').textContent = '加载失败'; }
+}
+
+// Save LLM config
+document.getElementById('btn-save-llm').onclick = async () => {
+  const data = {
+    base_url: document.getElementById('llm-base-url').value.trim(),
+    api_key: document.getElementById('llm-api-key').value.trim(),
+    model: document.getElementById('llm-model').value.trim() || 'gpt-4o',
+    temperature: parseFloat(document.getElementById('llm-temperature').value) || 0.5,
+    max_tokens: parseInt(document.getElementById('llm-max-tokens').value) || 2048,
+    timeout: parseInt(document.getElementById('llm-timeout').value) || 30,
+  };
+  try {
+    const r = await fetch('/api/analysis/config', {method:'POST', headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body:JSON.stringify(data)});
+    const d = await r.json();
+    showToast(d.error || 'LLM 配置已保存', d.error ? 'error' : 'success');
+    loadSettings();
+  } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
+};
+
+// Test LLM connection
+document.getElementById('btn-test-llm').onclick = async () => {
+  const el = document.getElementById('llm-test-result');
+  el.style.display = 'block'; el.style.color = '#8b949e'; el.textContent = '测试中...';
+  try {
+    const r = await fetch('/api/analysis/test', {method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}});
+    const d = await r.json();
+    el.style.color = d.ok ? '#3fb950' : '#f85149';
+    el.textContent = d.ok ? '✅ 连接成功: ' + (d.model || '') : '❌ ' + (d.error || '连接失败');
+  } catch(e) { el.style.color = '#f85149'; el.textContent = '❌ ' + e.message; }
+};
+
+// Save Obsidian path
+document.getElementById('btn-save-obsidian').onclick = async () => {
+  const path = document.getElementById('obsidian-path').value.trim();
+  try {
+    const r = await fetch('/api/knowledge/obsidian-config', {method:'POST', headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body:JSON.stringify({vault_path:path})});
+    const d = await r.json();
+    showToast(d.error || 'Obsidian 路径已保存', d.error ? 'error' : 'success');
+  } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
+};
+
+// Load Obsidian config
+async function loadObsidian() {
+  try {
+    const r = await fetch('/api/knowledge/obsidian-config');
+    const d = await r.json();
+    if (d.vault_path) document.getElementById('obsidian-path').value = d.vault_path;
+  } catch(e) {}
+}
+
+// Save backup root
+document.getElementById('btn-save-backup').onclick = async () => {
+  showToast('备份根目录需要在备份页面设置', 'info');
+};
+
+loadSettings();
+loadObsidian();
+</script>
+{% endblock %}

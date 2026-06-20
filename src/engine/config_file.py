@@ -147,6 +147,10 @@ def get_backup_data_dir() -> str | None:
 
 def set_backup_data_dir(data_dir: str, wxid: str | None = None) -> None:
     """Persist the backup data directory for other features to find."""
+    import logging
+    logger = logging.getLogger(__name__)
+    if data_dir and not os.path.isdir(data_dir):
+        logger.warning("Backup data directory does not exist: %s", data_dir)
     path = _config_path()
     cfg = {}
     try:
@@ -281,6 +285,8 @@ def set_db_keys(keys: dict, db_dir: str = '') -> None:
         keys: dict mapping db_rel_path -> 64-char hex enc_key
         db_dir: absolute path to WeChat db_storage directory
     """
+    import logging
+    logger = logging.getLogger(__name__)
     path = _config_path()
     cfg = {}
     try:
@@ -289,9 +295,17 @@ def set_db_keys(keys: dict, db_dir: str = '') -> None:
                 cfg = json.load(f)
     except (ValueError, OSError):
         pass
+    # Validate keys are 64-char hex strings
+    valid_keys = {}
+    for k, v in keys.items():
+        sv = str(v)
+        if len(sv) == 64 and all(c in '0123456789abcdefABCDEF' for c in sv):
+            valid_keys[str(k)] = sv
+        else:
+            logger.warning("Skipping invalid key for %s (not 64-char hex)", k)
     # Merge with existing keys so cold-shard keys from prior runs are not lost
     existing = cfg.get('db_keys', {})
-    existing.update({str(k): str(v) for k, v in keys.items()})
+    existing.update(valid_keys)
     cfg['db_keys'] = existing
     if db_dir:
         cfg['_db_dir'] = str(db_dir)
@@ -310,6 +324,49 @@ def get_db_dir() -> str | None:
     try:
         with open(path, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
-        return cfg.get('_db_dir', '')
+        val = cfg.get('_db_dir', '')
+        return val if val else None
     except (ValueError, OSError):
         return None
+
+
+def export_config(export_path: str) -> bool:
+    """Export current config to a file (without sensitive data like API keys)."""
+    import logging
+    logger = logging.getLogger(__name__)
+    cfg = _read_config()
+    # Remove sensitive fields
+    safe = {k: v for k, v in cfg.items() if k not in ('llm', 'db_keys')}
+    try:
+        with open(export_path, 'w', encoding='utf-8') as f:
+            json.dump(safe, f, ensure_ascii=False, indent=2)
+        return True
+    except OSError as e:
+        logger.warning("Failed to export config: %s", e)
+        return False
+
+
+def import_config(import_path: str) -> bool:
+    """Import config from a file, merging with existing config."""
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        with open(import_path, 'r', encoding='utf-8') as f:
+            imported = json.load(f)
+    except (ValueError, OSError) as e:
+        logger.warning("Failed to read import file: %s", e)
+        return False
+
+    existing = _read_config()
+    # Only import non-sensitive, known keys
+    safe_keys = {
+        'default_backup_root', 'obsidian_vault_path',
+        'group_blacklist', 'last_backup_data_dir', 'last_backup_wxid',
+        'knowledge_schedules', 'tags', 'knowledge_tags',
+    }
+    for key in safe_keys:
+        if key in imported:
+            existing[key] = imported[key]
+
+    _write_config(existing)
+    return True
