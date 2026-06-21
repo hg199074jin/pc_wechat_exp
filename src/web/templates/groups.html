@@ -62,6 +62,7 @@
 <div style="display:flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
   <h2 style="margin:0">🏷️ 群管理</h2>
   <div style="display:flex; gap:8px">
+    <button class="btn-secondary" id="space-manage-btn">📁 知识空间</button>
     <button class="btn-secondary" id="blacklist-manage-btn">🚫 黑名单管理</button>
     <button class="btn-secondary" id="auto-classify-btn">🤖 AI 自动分类</button>
     <button class="btn-primary" id="save-btn">💾 保存修改</button>
@@ -107,11 +108,32 @@
       <span class="hint">减少无价值旧群，加快加载</span>
     </div>
     <div id="group-items" aria-live="polite" aria-label="群列表"></div>
-    <div style="margin-top:12px; padding-top:12px; border-top:1px solid #30363d; display:flex; gap:8px; align-items:center">
+    <div style="margin-top:12px; padding-top:12px; border-top:1px solid #30363d; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
       <button class="btn-primary" id="move-selected-btn" disabled>📦 移动选中群到...</button>
       <select id="move-target" class="text-input" style="width:200px" aria-label="移动目标标签"></select>
+      <button class="btn-secondary" id="space-selected-btn" disabled>📁 设置知识空间</button>
+      <select id="space-target" class="text-input" style="width:160px" aria-label="目标知识空间" disabled></select>
       <button class="btn-secondary" id="blacklist-selected-btn" disabled>🚫 加入黑名单</button>
       <span class="hint" id="move-hint">先在上方勾选群，再选择目标标签</span>
+    </div>
+  </div>
+</div>
+<!-- Knowledge space modal -->
+<div class="modal" id="space-modal" hidden role="dialog" aria-modal="true" aria-labelledby="space-modal-title">
+  <div class="modal-content" style="width:620px;max-width:90vw">
+    <h3 style="margin-top:0" id="space-modal-title">📁 知识空间管理</h3>
+    <p class="hint">知识空间决定每个群的知识卡片同步到哪个 Obsidian 库。按标签一键绑定，该标签下的所有群会归入所选空间。</p>
+    <div id="space-list" style="max-height:200px;overflow-y:auto;border:1px solid #30363d;border-radius:6px;margin-bottom:12px"></div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+      <input type="text" class="text-input" id="new-space-name" placeholder="空间名（如：审计）" style="width:140px">
+      <input type="text" class="text-input" id="new-space-path" placeholder="Obsidian 路径（如 E:\Obsidian\Audit）" style="flex:1;min-width:200px">
+      <button class="btn-primary btn-tiny" id="add-space-btn">+ 新建</button>
+    </div>
+    <hr style="border-color:#30363d;margin:12px 0">
+    <h4 style="margin:0 0 8px;font-size:14px">标签 → 空间绑定</h4>
+    <div id="tag-space-bindings" style="max-height:260px;overflow-y:auto"></div>
+    <div class="modal-actions">
+      <button class="btn-secondary" id="close-space">关闭</button>
     </div>
   </div>
 </div>

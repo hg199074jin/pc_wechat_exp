@@ -61,9 +61,11 @@ const KnowledgeApp = {
     document.getElementById('btn-export-md').onclick = () => this.exportCards('md');
     document.getElementById('btn-export-docx').onclick = () => this.exportCards('docx');
 
-    // Obsidian sync
-    document.getElementById('btn-sync-obsidian').onclick = () => this.syncToObsidian();
-    document.getElementById('btn-obsidian-path').onclick = () => this.configureObsidianPath();
+    // Obsidian sync & knowledge space binding
+    const syncBtn2 = document.getElementById('btn-sync-obsidian');
+    if (syncBtn2) syncBtn2.onclick = () => this.syncToObsidian();
+    const createSpaceBtn = document.getElementById('btn-create-space');
+    if (createSpaceBtn) createSpaceBtn.onclick = () => this.createSpaceFromForm();
     this.loadObsidianConfig();
 
     // Agent rules
@@ -705,6 +707,22 @@ const KnowledgeApp = {
       }
       if (resp.status !== 200) {
         const data = await resp.json();
+        // Actionable prompt when groups lack knowledge-space binding.
+        if (data.needs_space_binding) {
+          const tags = (data.unassigned_tags || []).join('、') || '所选群聊';
+          statusEl.innerHTML = `⚠️ ${this.esc(tags)} 的群尚未绑定知识空间。<a href="#" id="goto-space-binding" style="color:#58a6ff">点击左侧「知识空间」面板一键绑定</a>`;
+          const link = document.getElementById('goto-space-binding');
+          if (link) link.onclick = (e) => {
+            e.preventDefault();
+            const panel = document.getElementById('space-binding-panel');
+            if (panel) {
+              panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              panel.style.outline = '2px solid #d29922';
+              setTimeout(() => { panel.style.outline = ''; }, 2000);
+            }
+          };
+          return;
+        }
         statusEl.textContent = '❌ ' + (data.error || '请求失败');
         return;
       }
@@ -776,54 +794,96 @@ const KnowledgeApp = {
   // -----------------------------------------------------------------------
 
   async loadObsidianConfig() {
-    const info = document.getElementById('obsidian-vault-info');
+    const panel = document.getElementById('space-binding-panel');
     const syncBtn = document.getElementById('btn-sync-obsidian');
-    if (!info) return;
+    if (syncBtn) syncBtn.disabled = false;
+    if (!panel) return;
     try {
-      const r = await _kf('/api/knowledge/spaces');
+      const r = await _kf('/api/knowledge/tag-space-status');
       const data = await r.json();
       this.knowledgeSpaces = data.spaces || [];
-      if (this.knowledgeSpaces.length) {
-        info.textContent = this.knowledgeSpaces.map(s => `${s.name} → ${s.vault_path}`).join('；');
-        info.style.color = '#7ee787';
-        if (syncBtn) syncBtn.disabled = false;
+      const tags = data.tags || [];
+
+      if (!this.knowledgeSpaces.length) {
+        panel.innerHTML = '<div style="font-size:12px;color:#8b949e">未配置知识空间。在下方新建空间（如 审计 → E:\\Obsidian\\Audit），然后为标签绑定。</div>';
+        return;
+      }
+
+      // Render each top-level tag with a space dropdown — one-click binding.
+      if (tags.length) {
+        panel.innerHTML = tags.map(t => {
+          const opts = ['<option value="">未绑定</option>']
+            .concat(this.knowledgeSpaces.map(s =>
+              `<option value="${this.esc(s.id)}"${s.id === t.bound_space_id ? ' selected' : ''}>${this.esc(s.name)}</option>`));
+          const badge = t.bound_count > 0
+            ? `<span style="color:#7ee787;font-size:11px">${t.bound_count}/${t.chat_count}</span>`
+            : (t.chat_count === 0 ? '<span style="color:#8b949e;font-size:11px">无群</span>'
+               : '<span style="color:#d29922;font-size:11px">未绑定</span>');
+          return `<div style="display:flex;align-items:center;gap:4px;margin-bottom:3px;font-size:12px">` +
+            `<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${this.esc(t.name)}">${this.esc(t.name)}</span>` +
+            badge +
+            `<select class="tag-space-select" data-tag-name="${this.esc(t.name)}" data-chat-ids="${this.esc((t.chat_ids||[]).join(','))}" style="width:90px;font-size:11px;padding:2px 4px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:3px">${opts.join('')}</select>` +
+            `</div>`;
+        }).join('');
+        // Wire up change events
+        panel.querySelectorAll('.tag-space-select').forEach(sel => {
+          sel.onchange = () => this._bindTagToSpace(sel.dataset.tagName, sel.value, sel.dataset.chatIds);
+        });
       } else {
-        info.textContent = '未配置知识库空间';
-        info.style.color = '#8b949e';
-        if (syncBtn) syncBtn.disabled = false;
+        panel.innerHTML = '<div style="font-size:12px;color:#8b949e">暂无标签。请在群管理页先创建标签并分配群。</div>';
       }
     } catch (e) {
-      info.textContent = '加载配置失败';
+      panel.innerHTML = `<div style="font-size:12px;color:#f85149">加载失败: ${this.esc(e.message)}</div>`;
     }
   },
 
-  async configureObsidianPath() {
-    const name = prompt('知识库名称（例如：审计、AI、副业）：');
-    if (name === null || !String(name).trim()) return;
-    const path = prompt('对应 Obsidian vault 的本地绝对路径（例如 E:\\\\Obsidian\\\\Audit）：');
-    if (path === null || !String(path).trim()) return;
-    const resultEl = document.getElementById('obsidian-sync-result');
+  async createSpaceFromForm() {
+    const nameEl = document.getElementById('new-space-name');
+    const pathEl = document.getElementById('new-space-path');
+    const name = (nameEl && nameEl.value || '').trim();
+    const path = (pathEl && pathEl.value || '').trim();
+    if (!name || !path) { showToast('请填写空间名称和 Obsidian 路径', 'warning'); return; }
     try {
       const r = await _kf('/api/knowledge/spaces', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: String(name).trim(), vault_path: String(path).trim() }),
+        body: JSON.stringify({ name, vault_path: path }),
       });
       const data = await r.json();
-      if (!r.ok) {
-        showToast('保存失败: ' + (data.error || '未知错误'), 'error');
-        return;
-      }
+      if (!r.ok) { showToast('创建失败: ' + (data.error || '未知错误'), 'error'); return; }
+      if (nameEl) nameEl.value = '';
+      if (pathEl) pathEl.value = '';
+      showToast(`✓ 知识空间「${name}」已创建`, 'success');
       await this.loadObsidianConfig();
-      if (resultEl) resultEl.textContent = '✓ 知识库空间已保存；请通过接口为群分配归属。';
     } catch (e) {
-      showToast('保存失败: ' + e.message, 'error');
+      showToast('创建失败: ' + e.message, 'error');
+    }
+  },
+
+  async _bindTagToSpace(tagName, spaceId, chatIdsCsv) {
+    const chatIds = (chatIdsCsv || '').split(',').filter(Boolean);
+    if (!chatIds.length) { showToast(`标签「${tagName}」下没有群`, 'info'); return; }
+    if (!spaceId) { showToast(`已选择不绑定「${tagName}」`, 'info'); return; }
+    const space = (this.knowledgeSpaces || []).find(s => s.id === spaceId);
+    const spaceName = space ? space.name : '';
+    try {
+      const r = await _kf(`/api/knowledge/spaces/${encodeURIComponent(spaceId)}/chats`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_ids: chatIds }),
+      });
+      const data = await r.json();
+      if (!r.ok) { showToast('绑定失败: ' + (data.error || '未知错误'), 'error'); return; }
+      showToast(`✓ 「${tagName}」的 ${data.assigned} 个群 → 「${spaceName}」`, 'success');
+      await this.loadObsidianConfig();
+    } catch (e) {
+      showToast('绑定失败: ' + e.message, 'error');
     }
   },
 
   async syncToObsidian() {
     if (!this.knowledgeSpaces || !this.knowledgeSpaces.length) {
-      showToast('请先点击「⚙ 配置知识库」创建至少一个知识库空间', 'warning');
+      showToast('请先在上方创建至少一个知识空间', 'warning');
       return;
     }
     const resultEl = document.getElementById('obsidian-sync-result');

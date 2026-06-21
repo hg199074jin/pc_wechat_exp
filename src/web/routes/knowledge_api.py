@@ -135,6 +135,65 @@ def assign_space_chats_api(space_id):
         return jsonify({'error': str(e)}), 400
     return jsonify({'ok': True, 'assigned': count})
 
+
+@knowledge_bp.route('/tag-space-status')
+def tag_space_status_api():
+    """Return each top-level tag's knowledge-space binding status.
+
+    Used by the binding panels on both the Group Management page and the
+    Knowledge Radar page. For every top-level tag, reports:
+      - name, chat_ids, chat_count
+      - bound_space_id / bound_space_name (most common space among its chats)
+      - bound_count / unbound_count
+    """
+    tags = load_tags(_config_path())
+    dbp = _db_path()
+    spaces = store.list_knowledge_spaces(dbp)
+    space_by_id = {s['id']: s for s in spaces}
+
+    # Collect chat_ids per top-level tag.
+    result = []
+    for tag in tags or []:
+        name = tag.get('name') or ''
+        chat_ids = list(tag.get('chat_ids') or [])
+        # Also include chats under child tags.
+        def _collect(node, acc):
+            for cid in node.get('chat_ids') or []:
+                acc.append(cid)
+            for child in node.get('children') or []:
+                _collect(child, acc)
+        _collect(tag, chat_ids)
+        chat_ids = list(dict.fromkeys(cid for cid in chat_ids if cid))
+
+        # Resolve each chat's current space assignment.
+        partition = store.partition_chat_ids_by_knowledge_space(dbp, chat_ids)
+        space_counts = {}  # space_id -> count
+        for bucket in partition.get('buckets') or []:
+            sid = bucket['space']['id']
+            space_counts[sid] = space_counts.get(sid, 0) + len(bucket['chat_ids'])
+        unbound_count = len(partition.get('unassigned') or [])
+
+        # The "bound" space is whichever space holds the majority of this tag's
+        # chats (ties broken by first). None if no chats are bound.
+        bound_space_id = ''
+        if space_counts:
+            bound_space_id = max(space_counts, key=lambda k: (space_counts[k], k))
+        bound_space = space_by_id.get(bound_space_id, {})
+        bound_count = sum(space_counts.values())
+
+        result.append({
+            'name': name,
+            'chat_ids': chat_ids,
+            'chat_count': len(chat_ids),
+            'bound_space_id': bound_space_id,
+            'bound_space_name': bound_space.get('name') or '',
+            'bound_count': bound_count,
+            'unbound_count': unbound_count,
+        })
+
+    return jsonify({'tags': result, 'spaces': spaces})
+
+
 @knowledge_bp.route('/cards')
 def list_cards_api():
     result = _list_cards_for_request()
@@ -458,9 +517,28 @@ def run_knowledge_scan():
     cfg_path = config_path_for(decrypted_dir)
     partition = store.partition_chat_ids_by_knowledge_space(dbp, chat_ids)
     space_by_chat = {cid: bucket['space']['id'] for bucket in partition['buckets'] for cid in bucket['chat_ids']}
+    unassigned_chats = partition.get('unassigned') or []
+    # Map unassigned chats back to their top-level tag names so the UI can tell
+    # the user exactly which tags need binding (instead of a generic error).
+    unassigned_tags = []
+    if unassigned_chats:
+        chat_tag_paths = _chat_tag_paths(load_tags(cfg_path))
+        tag_set = set()
+        for cid in unassigned_chats:
+            for path in chat_tag_paths.get(cid, []):
+                # path is like '审计_Audit' or '审计_Audit/子标签'; take top level
+                top = path.split('/', 1)[0]
+                if top:
+                    tag_set.add(top)
+        unassigned_tags = sorted(tag_set)
     chat_ids = [cid for cid in chat_ids if cid in space_by_chat]
     if not chat_ids:
-        return jsonify({'error': '所选群聊尚未设置知识库归属，请先配置知识库空间'}), 400
+        return jsonify({
+            'error': '所选群聊尚未设置知识库归属，请先配置知识库空间',
+            'unassigned_chats': unassigned_chats,
+            'unassigned_tags': unassigned_tags,
+            'needs_space_binding': True,
+        }), 400
 
     # Resolve chat names before entering thread
     chat_names = {}

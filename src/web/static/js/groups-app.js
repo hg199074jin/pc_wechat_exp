@@ -435,16 +435,19 @@ const GroupsApp = {
 
   _updateMoveButton() {
     const checked = document.querySelectorAll('#group-items input:checked');
+    const hasChecked = checked.length > 0;
     const btn = document.getElementById('move-selected-btn');
-    if (btn) btn.disabled = checked.length === 0;
+    if (btn) btn.disabled = !hasChecked;
     const blacklistBtn = document.getElementById('blacklist-selected-btn');
     if (blacklistBtn) {
       const isUntagged = this.selectedTagPath === null;
       blacklistBtn.style.display = isUntagged ? '' : 'none';
-      blacklistBtn.disabled = !isUntagged || checked.length === 0;
+      blacklistBtn.disabled = !isUntagged || !hasChecked;
     }
+    const spaceBtn = document.getElementById('space-selected-btn');
+    if (spaceBtn) spaceBtn.disabled = !hasChecked;
     const hint = document.getElementById('move-hint');
-    if (hint) hint.textContent = checked.length > 0 ? `已选 ${checked.length} 个群` : '先在上方勾选群，再选择目标标签';
+    if (hint) hint.textContent = hasChecked ? `已选 ${checked.length} 个群` : '先在上方勾选群，再选择目标标签';
   },
 
   _populateMoveTargets() {
@@ -941,12 +944,170 @@ const GroupsApp = {
       e.stopPropagation();
       this._removeFromTag(btn.dataset.wxid);
     });
+
+    // Knowledge space management
+    const spaceManageBtn = document.getElementById('space-manage-btn');
+    if (spaceManageBtn) spaceManageBtn.onclick = () => this._openSpaceModal();
+    const closeSpaceBtn = document.getElementById('close-space');
+    if (closeSpaceBtn) closeSpaceBtn.onclick = () => {
+      const modal = document.getElementById('space-modal');
+      if (modal) modal.hidden = true;
+    };
+    const addSpaceBtn = document.getElementById('add-space-btn');
+    if (addSpaceBtn) addSpaceBtn.onclick = () => this._createSpace();
+    const tagBindings = document.getElementById('tag-space-bindings');
+    if (tagBindings) {
+      tagBindings.addEventListener('change', (e) => {
+        const sel = e.target.closest('.tag-space-select');
+        if (sel) this._bindTagToSpace(sel.dataset.tagName, sel.value, sel.dataset.chatIds);
+      });
+    }
+    // Batch-set knowledge space on selected groups
+    const spaceSelectedBtn = document.getElementById('space-selected-btn');
+    if (spaceSelectedBtn) spaceSelectedBtn.onclick = () => this._assignSelectedToSpace();
   },
 
   _esc(s) {
     const d = document.createElement('div');
     d.textContent = s || '';
     return d.innerHTML;
+  },
+
+  // -------------------------------------------------------------------------
+  // Knowledge space management
+  // -------------------------------------------------------------------------
+
+  _knowledgeSpaces: [],
+
+  async _openSpaceModal() {
+    const modal = document.getElementById('space-modal');
+    if (modal) modal.hidden = false;
+    await this._loadSpaceStatus();
+  },
+
+  async _loadSpaceStatus() {
+    const listEl = document.getElementById('space-list');
+    const bindingsEl = document.getElementById('tag-space-bindings');
+    const spaceTarget = document.getElementById('space-target');
+    try {
+      const r = await _gf('/api/knowledge/tag-space-status');
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      this._knowledgeSpaces = data.spaces || [];
+
+      // Render space list
+      if (listEl) {
+        if (!this._knowledgeSpaces.length) {
+          listEl.innerHTML = '<div class="hint" style="padding:12px">尚未创建知识空间。在下方新建，或每个标签可留"未绑定"。</div>';
+        } else {
+          listEl.innerHTML = this._knowledgeSpaces.map(s =>
+            `<div class="blacklist-row"><span class="blacklist-name">📁 ${this._esc(s.name)}</span>` +
+            `<span class="hint">${this._esc(s.vault_path)}</span></div>`
+          ).join('');
+        }
+      }
+
+      // Populate batch-assign dropdown (outside modal too)
+      const opts = ['<option value="">-- 选择空间 --</option>']
+        .concat(this._knowledgeSpaces.map(s => `<option value="${this._esc(s.id)}">${this._esc(s.name)}</option>`));
+      if (spaceTarget) spaceTarget.innerHTML = opts.join('');
+
+      // Render tag → space bindings
+      if (bindingsEl) {
+        const tags = data.tags || [];
+        if (!tags.length) {
+          bindingsEl.innerHTML = '<div class="hint" style="padding:12px">暂无标签。请先在左侧标签树创建标签并分配群。</div>';
+        } else {
+          bindingsEl.innerHTML = tags.map(t => {
+            const spaceOpts = ['<option value="">未绑定</option>']
+              .concat(this._knowledgeSpaces.map(s =>
+                `<option value="${this._esc(s.id)}"${s.id === t.bound_space_id ? ' selected' : ''}>${this._esc(s.name)}</option>`));
+            const status = t.bound_count > 0
+              ? `<span class="hint">${t.bound_count}/${t.chat_count} 已绑定</span>`
+              : (t.chat_count === 0 ? '<span class="hint">无群</span>' : '<span class="hint" style="color:#d29922">未绑定</span>');
+            return `<div class="blacklist-row">` +
+              `<span class="blacklist-name">${this._esc(t.name)} <span class="hint">(${t.chat_count}群)</span></span>` +
+              status +
+              `<select class="text-input tag-space-select" style="width:130px" data-tag-name="${this._esc(t.name)}" data-chat-ids="${this._esc((t.chat_ids||[]).join(','))}">${spaceOpts.join('')}</select>` +
+              `</div>`;
+          }).join('');
+        }
+      }
+    } catch (e) {
+      if (listEl) listEl.innerHTML = `<div class="hint" style="color:#f85149;padding:12px">加载失败: ${this._esc(e.message)}</div>`;
+    }
+  },
+
+  async _createSpace() {
+    const nameEl = document.getElementById('new-space-name');
+    const pathEl = document.getElementById('new-space-path');
+    const name = (nameEl && nameEl.value || '').trim();
+    const path = (pathEl && pathEl.value || '').trim();
+    if (!name || !path) { showToast('请填写空间名称和 Obsidian 路径', 'warning'); return; }
+    try {
+      const r = await _gf('/api/knowledge/spaces', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, vault_path: path }),
+      });
+      const data = await r.json();
+      if (!r.ok) { showToast('创建失败: ' + (data.error || '未知错误'), 'error'); return; }
+      if (nameEl) nameEl.value = '';
+      if (pathEl) pathEl.value = '';
+      showToast(`✓ 知识空间「${name}」已创建`, 'success');
+      await this._loadSpaceStatus();
+    } catch (e) {
+      showToast('创建失败: ' + e.message, 'error');
+    }
+  },
+
+  async _bindTagToSpace(tagName, spaceId, chatIdsCsv) {
+    const chatIds = (chatIdsCsv || '').split(',').filter(Boolean);
+    if (!chatIds.length) { showToast(`标签「${tagName}」下没有群，无需绑定`, 'info'); return; }
+    if (!spaceId) {
+      // Unbinding is not destructive; we just skip. No backend "clear" endpoint.
+      showToast(`已选择不绑定「${tagName}」`, 'info');
+      return;
+    }
+    const space = this._knowledgeSpaces.find(s => s.id === spaceId);
+    const spaceName = space ? space.name : '';
+    try {
+      const r = await _gf(`/api/knowledge/spaces/${encodeURIComponent(spaceId)}/chats`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_ids: chatIds }),
+      });
+      const data = await r.json();
+      if (!r.ok) { showToast('绑定失败: ' + (data.error || '未知错误'), 'error'); return; }
+      showToast(`✓ 已把「${tagName}」的 ${data.assigned} 个群绑到「${spaceName}」`, 'success');
+      await this._loadSpaceStatus();
+    } catch (e) {
+      showToast('绑定失败: ' + e.message, 'error');
+    }
+  },
+
+  async _assignSelectedToSpace() {
+    const checked = [...document.querySelectorAll('#group-items input:checked')].map(cb => cb.dataset.wxid);
+    const spaceId = document.getElementById('space-target').value;
+    if (!checked.length) { showToast('请先勾选群', 'warning'); return; }
+    if (!spaceId) { showToast('请先在右侧下拉选择目标知识空间', 'warning'); return; }
+    const space = this._knowledgeSpaces.find(s => s.id === spaceId);
+    const spaceName = space ? space.name : '';
+    if (!confirm(`把选中的 ${checked.length} 个群的知识卡片归属设为「${spaceName}」？`)) return;
+    try {
+      const r = await _gf(`/api/knowledge/spaces/${encodeURIComponent(spaceId)}/chats`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_ids: checked }),
+      });
+      const data = await r.json();
+      if (!r.ok) { showToast('设置失败: ' + (data.error || '未知错误'), 'error'); return; }
+      showToast(`✓ ${data.assigned} 个群已归属「${spaceName}」`, 'success');
+      [...document.querySelectorAll('#group-items input:checked')].forEach(cb => cb.checked = false);
+      this._updateMoveButton();
+    } catch (e) {
+      showToast('设置失败: ' + e.message, 'error');
+    }
   },
 };
 
